@@ -764,7 +764,6 @@ struct cpu : private timer_base::client {
     thread* bringup_thread;
     runqueue_type runqueue;
     timer_list timers;
-    timer_base preemption_timer;
     thread* idle_thread;
     // if true, cpu is now polling incoming_wakeups_mask
     std::atomic<bool> idle_poll = { false };

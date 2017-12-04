@@ -140,7 +140,6 @@ private:
 
 cpu::cpu(unsigned _id)
     : id(_id)
-    , preemption_timer(*this)
     , idle_thread()
     , terminating_thread(nullptr)
     , c(cinitial)
@@ -283,9 +282,6 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
     trace_sched_load(runqueue.size());
 
     n->_detached_state->st.store(thread::status::running);
-
-    preemption_timer.cancel();
-    preemption_timer.set(now + preempt_after);
 
     if (app_thread.load(std::memory_order_relaxed) != n->_app) { // don't write into a cache line if it can be avoided
         app_thread.store(n->_app, std::memory_order_relaxed);
