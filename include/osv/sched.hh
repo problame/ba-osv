@@ -59,7 +59,6 @@ struct cpu;
 class timer;
 class timer_list;
 class cpu_mask;
-class thread_runtime_compare;
 template <typename T> class wait_object;
 
 extern "C" {
@@ -235,71 +234,13 @@ private:
 };
 
 extern thread __thread * s_current;
-// thread_runtime is used to maintain the scheduler's view of the thread's
-// priority relative to other threads. It knows about a static priority of the
-// thread (allowing a certain thread to get more runtime than another threads)
-// and is used to maintain the "runtime" of each thread, a number which the
-// scheduler uses to decide which thread to run next, and for how long.
-// All methods of this class should be called only from within the scheduler.
-// https://docs.google.com/document/d/1W7KCxOxP-1Fy5EyF2lbJGE2WuKmu5v0suYqoHas1jRM
+
+/**
+ * Leftover stub from OSv scheduler
+ */
 class thread_runtime {
 public:
     using duration = osv::clock::uptime::duration;
-    // Get the thread's CPU-local runtime, a number used to sort the runqueue
-    // on this CPU (lowest runtime will be run first). local runtime cannot be
-    // compared between different different CPUs - see export_runtime().
-    inline runtime_t get_local() const
-    {
-        return _Rtt;
-    }
-    // Convert the thread's CPU-local runtime to a global scale which can be
-    // understood on any CPU. Use this function when migrating the thread to a
-    // different CPU, and the destination CPU should run update_after_sleep().
-    void export_runtime();
-    // Update the thread's local runtime after a sleep, when we potentially
-    // missed one or more renormalization steps (which were only done to
-    // runnable threads), or need to convert global runtime to local runtime.
-    void update_after_sleep();
-    // Increase thread's runtime considering that it has now run for "time"
-    // nanoseconds at the current priority.
-    // Remember that the run queue is ordered by local runtime, so never call
-    // ran_for() or hysteresis_*() on a thread which is already in the queue.
-    void ran_for(duration time);
-    // Temporarily decrease the running thread's runtime to provide hysteresis
-    // (avoid switching threads quickly after deciding on one).
-    // Use hystersis_run_start() when switching to a thread, and
-    // hysteresis_run_stop() when switching away from a thread.
-    void hysteresis_run_start();
-    void hysteresis_run_stop();
-    void add_context_switch_penalty();
-    // Given a target local runtime higher than our own, calculate how much
-    // time (in nanoseconds) it would take until ran_for(time) would bring our
-    // thread to the given target. Returns -1 if the time is too long to
-    // express in s64.
-    duration time_until(runtime_t target_local_runtime) const;
-
-    void set_priority(runtime_t priority) {
-        _priority = priority;
-    }
-
-    runtime_t priority() const {
-        return _priority;
-    }
-
-    // When _Rtt=0, multiplicative normalization doesn't matter, so it doesn't
-    // matter what we set for _renormalize_count. We can't set it properly
-    // in the constructor (it doesn't run from the scheduler, or know which
-    // CPU's counter to copy), so we'll fix it in ran_for().
-    constexpr thread_runtime(runtime_t priority) :
-            _priority(priority),
-            _Rtt(0), _renormalize_count(-1) { };
-
-private:
-    runtime_t _priority;            // p in the document
-    runtime_t _Rtt;                 // R'' in the document
-    // If _renormalize_count == -1, it means the runtime is global
-    // (i.e., export_runtime() was called, or this is a new thread).
-    int _renormalize_count;
 };
 
 // "tau" controls the length of the history we consider for scheduling,
@@ -667,7 +608,6 @@ private:
     //   terminating   terminated   async    post context switch
     //
     // wake() on any state except waiting is discarded.
-    thread_runtime _runtime;
     // part of the thread state is detached from the thread structure,
     // and freed by rcu, so that waking a thread and destroying it can
     // occur in parallel without synchronization via thread_handle
@@ -701,9 +641,7 @@ private:
     friend class wait_guard;
     friend struct cpu;
     friend class timer;
-    friend class thread_runtime_compare;
     friend struct arch_cpu;
-    friend class thread_runtime;
     friend void migrate_enable();
     friend void migrate_disable();
     friend void ::smp_main();
@@ -711,7 +649,7 @@ private:
     friend void init(std::function<void ()> cont);
 public:
     std::atomic<thread *> _joiner;
-    bi::set_member_hook<> _runqueue_link;
+    bi::list_member_hook<> _runqueue_link;
     // see cpu class
     lockless_queue_link<thread> _wakeup_link;
     static unsigned long _s_idgen;
@@ -812,18 +750,10 @@ private:
 std::chrono::nanoseconds osv_run_stats();
 osv::clock::uptime::duration process_cputime();
 
-class thread_runtime_compare {
-public:
-    bool operator()(const thread& t1, const thread& t2) const {
-        return t1._runtime.get_local() < t2._runtime.get_local();
-    }
-};
-
-typedef bi::rbtree<thread,
+typedef bi::list<thread,
                    bi::member_hook<thread,
-                                   bi::set_member_hook<>,
+                                   bi::list_member_hook<>,
                                    &thread::_runqueue_link>,
-                   bi::compare<thread_runtime_compare>,
                    bi::constant_time_size<true> // for load estimation
                   > runqueue_type;
 
