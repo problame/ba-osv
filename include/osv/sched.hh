@@ -782,6 +782,7 @@ struct cpu : private timer_base::client {
     static cpu* current();
     void init_on_cpu();
     static void schedule();
+    void bring_up();
     void handle_incoming_wakeups();
     bool poll_wakeup_queue();
     void idle();
@@ -789,7 +790,6 @@ struct cpu : private timer_base::client {
     void idle_poll_start();
     void idle_poll_end();
     void send_wakeup_ipi();
-    void load_balance();
     unsigned load();
     /**
      * Try to reschedule.
