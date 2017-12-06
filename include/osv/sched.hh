@@ -795,18 +795,9 @@ struct cpu : private timer_base::client {
      * Try to reschedule.
      *
      * Tries to choose a different thread to run instead of the current one
-     * based on the runtime of the runnable threads on the current CPU.
-     *
-     * When called from the sched::yield(), ensures that if there are other
-     * runnable threads on the current CPU (except for the idle thread) there
-     * will be a context switch.
-     *
-     * @param called_from_yield TRUE when called from sched::yield()
-     * @param preempt_after fire the preemption timer after this time period
-     *                      (relevant only when "called_from_yield" is TRUE)
+     * on the current CPU from its runqueue.
      */
-    void reschedule_from_interrupt(bool called_from_yield = false,
-                                thread_runtime::duration preempt_after = thyst);
+    void reschedule_from_interrupt();
     void enqueue(thread& t);
     void init_idle_thread();
     virtual void timer_fired() override;

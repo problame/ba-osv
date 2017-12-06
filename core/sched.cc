@@ -228,8 +228,7 @@ void cpu::schedule()
     }
 }
 
-void cpu::reschedule_from_interrupt(bool called_from_yield,
-                                    thread_runtime::duration preempt_after)
+void cpu::reschedule_from_interrupt()
 {
     trace_sched_sched();
     assert(sched::exception_depth <= 1);
@@ -659,7 +658,7 @@ void thread::yield(thread_runtime::duration preempt_after)
     }
     trace_sched_yield_switch();
 
-    cpu::current()->reschedule_from_interrupt(true, preempt_after);
+    cpu::current()->reschedule_from_interrupt();
 }
 
 void thread::set_priority(float priority)
