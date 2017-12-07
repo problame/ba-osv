@@ -429,25 +429,6 @@ public:
      */
     static void pin(cpu *target_cpu);
     /**
-     * Pin the given thread to the target CPU.
-     *
-     * This will migrate the given thread to the target CPU. After this
-     * function returns, the thread is guaranteed to only run on the target
-     * CPU.
-     *
-     * A thread cannot be migrated while holding a migrate_disable() lock,
-     * so pin() waits until it is released. However, re-pinning an already
-     * pinned thread (which is not additionally holding a migrate_disable())
-     * is allowed.
-     *
-     * Currently, calling this function on a dead or dying thread may cause
-     * a crash.
-     *
-     * For historic reasons (the previous existance of the pin(cpu*) static
-     * method), this is a static function taking the thread as a parameter.
-     */
-    static void pin(thread *t, cpu *target_cpu);
-    /**
      * Unpin the given thread.
      *
      * This undoes the operation of a previous pin() operation (if any), and

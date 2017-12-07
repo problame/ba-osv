@@ -101,9 +101,8 @@ namespace pthread_private {
         size_t stack_size;
         size_t guard_size;
         bool detached;
-        cpu_set_t *cpuset;
         sched::cpu *cpu;
-        thread_attr() : stack_begin{}, stack_size{1<<20}, guard_size{4096}, detached{false}, cpuset{nullptr}, cpu{nullptr} {}
+        thread_attr() : stack_begin{}, stack_size{1<<20}, guard_size{4096}, detached{false}, cpu{nullptr} {}
     };
 
     pthread::pthread(void *(*start)(void *arg), void *arg, sigset_t sigset,
@@ -196,42 +195,8 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     sigprocmask(SIG_SETMASK, nullptr, &sigset);
 
     thread_attr tmp;
-    cpu_set_t tmp_cpuset;
     if (attr != nullptr) {
         tmp = *from_libc(attr);
-    }
-
-    if (tmp.cpuset == nullptr) {
-        // Parent thread CPU pinning should be inherited if CPU pinning
-        // was not explicitly set from input attr.
-        tmp.cpuset = &tmp_cpuset;
-        sched_getaffinity(0, sizeof(*tmp.cpuset), tmp.cpuset);
-    }
-
-    // We have a CPU set. If we have only one bit set in the set, we
-    // pin it to the corresponding CPU. If the set exists, but has no
-    // CPUs set, we do nothing. Otherwise, warn the user, and do
-    // nothing.
-    int count = CPU_COUNT(tmp.cpuset);
-    if (count == 0) {
-        // Having a cpuset with no CPUs in it is invalid.
-        return EINVAL;
-    } else if (count == 1) {
-        for (size_t i = 0; i < __CPU_SETSIZE; i++) {
-            if (CPU_ISSET(i, tmp.cpuset)) {
-                if (i < sched::cpus.size()) {
-                    tmp.cpu = sched::cpus[i];
-                    break;
-                } else {
-                    return EINVAL;
-                }
-            }
-        }
-    } else if (count == (int)sched::cpus.size()) {
-        // start unpinned
-    } else {
-        printf("Warning: OSv only supports cpu_set_t with at most one "
-               "CPU set.\n The cpu_set_t provided will be ignored.\n");
     }
 
     t = new pthread(start_routine, arg, sigset, &tmp);
@@ -623,10 +588,6 @@ int pthread_attr_init(pthread_attr_t *attr)
 
 int pthread_attr_destroy(pthread_attr_t *attr)
 {
-    auto *a = from_libc(attr);
-    if (a != nullptr && a->cpuset != nullptr) {
-        delete a->cpuset;
-    }
     return 0;
 }
 
@@ -983,155 +944,44 @@ pid_t pthread_gettid_np(pthread_t p)
 int pthread_attr_setaffinity_np(pthread_attr_t *attr, size_t cpusetsize,
         const cpu_set_t *cpuset)
 {
-    if (sizeof(cpu_set_t) < cpusetsize) {
-        return EINVAL;
-    }
-
-    auto a = from_libc(attr);
-    if (a->cpuset == nullptr) {
-        a->cpuset = new cpu_set_t;
-    }
-
-    if (cpusetsize < sizeof(cpu_set_t)) {
-        memset(a->cpuset, 0, sizeof(cpu_set_t));
-    }
-    memcpy(a->cpuset, cpuset, cpusetsize);
-
-    return 0;
-}
-
-static int setaffinity(sched::thread* t, size_t cpusetsize,
-        const cpu_set_t *cpuset)
-{
-    int count = CPU_COUNT_S(cpusetsize, cpuset);
-    if (count == 0) {
-        // Having a cpuset with no CPUs in it is invalid.
-        return EINVAL;
-    } else if (count == 1) {
-        for (size_t i = 0; i < cpusetsize * 8; i++) {
-            if (CPU_ISSET(i, cpuset)) {
-                if (i < sched::cpus.size()) {
-                    sched::thread::pin(t, sched::cpus[i]);
-                    break;
-                } else {
-                    return EINVAL;
-                }
-            }
-        }
-    } else if (count == (int)sched::cpus.size()) {
-        t->unpin();
-    } else {
-        WARN_ONCE("Warning: OSv only supports cpu_set_t with at most one "
-                "CPU set.\n pthread_setaffinity_np or sched_setaffinity ignored.\n");
-        return EINVAL;
-    }
-    return 0;
+    WARN_STUBBED();
+    return EINVAL;
 }
 
 int pthread_setaffinity_np(pthread_t thread, size_t cpusetsize,
         const cpu_set_t *cpuset)
 {
-    sched::thread *t = &*pthread::from_libc(thread)->_thread;
-    return setaffinity(t, cpusetsize, cpuset);
+    WARN_STUBBED();
+    return EINVAL;
 }
 
 int sched_setaffinity(pid_t pid, size_t cpusetsize,
         cpu_set_t *cpuset)
 {
-    sched::thread *t;
-    if (pid == 0) {
-        t = sched::thread::current();
-    } else {
-        t = sched::thread::find_by_id(pid);
-        if (!t) {
-            errno = ESRCH;
-            return -1;
-        }
-        // TODO: After the thread was found, if it exits the code below
-        // may crash. Perhaps we should have a version of find_by_id(),
-        // with_thread_by_id(pid, func), which holds thread_map_mutex while
-        // func runs.
-    }
-    int err = setaffinity(t, cpusetsize, cpuset);
-    if (err) {
-        errno = err;
-        return -1;
-    }
-    return 0;
-}
-
-static int getaffinity(const sched::thread *t, size_t cpusetsize,
-        cpu_set_t *cpuset)
-{
-    if (sched::cpus.size() > cpusetsize * 8) {
-        // not enough room in cpuset
-        return EINVAL;
-    }
-    // Currently OSv does not have a real notion of a list of allowable
-    // CPUs for a thread, as Linux does, but we have the notion of pinning
-    // the thread to a single CPU. Note that if the CPU is only temporarily
-    // bound to a CPU with a migration_lock (e.g., while accessing a per-cpu
-    // variable), it is not considered pinned.
-    memset(cpuset, 0, cpusetsize);
-    if (!t->pinned()) {
-        for (unsigned i = 0; i < sched::cpus.size(); i++) {
-            CPU_SET(i, cpuset);
-        }
-    } else {
-        CPU_SET(t->tcpu()->id, cpuset);
-    }
-    return 0;
+    WARN_STUBBED();
+    errno = EINVAL;
+    return -1;
 }
 
 int pthread_getaffinity_np(const pthread_t thread, size_t cpusetsize,
         cpu_set_t *cpuset)
 {
-    const sched::thread *t = &*pthread::from_libc(thread)->_thread;
-    return getaffinity(t, cpusetsize, cpuset);
+    WARN_STUBBED();
+    return EPERM;
 }
 
 int sched_getaffinity(pid_t pid, size_t cpusetsize,
         cpu_set_t *cpuset)
 {
-    sched::thread *t;
-    if (pid == 0) {
-        t = sched::thread::current();
-    } else {
-        t = sched::thread::find_by_id(pid);
-        if (!t) {
-            errno = ESRCH;
-            return -1;
-        }
-        // TODO: After the thread was found, if it exits the code below
-        // may crash. Perhaps we should have a version of find_by_id(),
-        // with_thread_by_id(pid, func), which holds thread_map_mutex while
-        // func runs.
-    }
-    int err = getaffinity(t, cpusetsize, cpuset);
-    if (err) {
-        errno = err;
-        return -1;
-    }
-    return 0;
+    WARN_STUBBED();
+    errno = EPERM;
+    return -1;
 }
 
 int pthread_attr_getaffinity_np(const pthread_attr_t *attr, size_t cpusetsize,
         cpu_set_t *cpuset)
 {
-    if (sizeof(cpu_set_t) > cpusetsize) {
-        return EINVAL;
-    }
-
-    auto a = from_libc(attr);
-    if (a->cpuset == nullptr) {
-        memset(cpuset, -1, cpusetsize);
-        return 0;
-    }
-
-    if (sizeof(cpu_set_t) < cpusetsize) {
-        memset(cpuset, 0, cpusetsize);
-    }
-    memcpy(cpuset, a->cpuset, sizeof(cpu_set_t));
-
-    return 0;
+    WARN_STUBBED();
+    errno = EPERM;
+    return -1;
 }
