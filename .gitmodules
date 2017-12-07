@@ -24,7 +24,7 @@
 	ignore = dirty
 [submodule "apps"]
 	path = apps
-	url = ../../cloudius-systems/osv-apps
+	url = ../../cschwarz/ba-osv-apps
 	ignore = dirty
 [submodule "external/aarch64/gcc.bin"]
 	path = external/aarch64/gcc.bin
