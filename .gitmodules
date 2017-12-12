@@ -47,3 +47,6 @@
 [submodule "external/fs/libnfs"]
 	path = external/fs/libnfs
 	url = https://github.com/sahlberg/libnfs.git
+[submodule "external/scripts/qemu-affinity"]
+	path = external/scripts/qemu-affinity
+	url = https://github.com/zegelin/qemu-affinity.git

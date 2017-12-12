@@ -7,6 +7,8 @@ import os
 import tempfile
 import errno
 import re
+import shlex
+import time
 
 stty_params = None
 
@@ -186,6 +188,9 @@ def start_osv_qemu(options):
         args += ["-mon", "chardev=stdio,mode=readline"]
         args += ["-device", "isa-serial,chardev=stdio"]
 
+    if options.qemu_affinity_args:
+        args += ["-name", "osv-%d,debug-threads=on" % (os.getpid())]
+
     for a in options.pass_args or []:
         args += a.split()
 
@@ -201,7 +206,26 @@ def start_osv_qemu(options):
         if options.dry_run:
             print(format_args(cmdline))
         else:
-            subprocess.call(cmdline, env=qemu_env)
+            qemu_process = subprocess.Popen(cmdline, env=qemu_env)
+            print("qemu_process.pid = {0}".format(qemu_process.pid))
+            if options.qemu_affinity_args:
+                qemu_affinity_args = shlex.split(options.qemu_affinity_args)
+                qemu_affinity_args += ["--", "{0}".format(qemu_process.pid)]
+                qemu_affinity_args = ["python3", "external/scripts/qemu-affinity/qemu_affinity.py"] + qemu_affinity_args
+                try:
+                    print("waiting for qemu to set up vcpus, FIXME using sleep()")
+                    time.sleep(1)
+                    print("starting qemu-affinity subprocess: {0}".format(qemu_affinity_args))
+                    output = subprocess.check_output(qemu_affinity_args, stderr=subprocess.PIPE)
+                    print(output)
+                    print("finished qemu-affinity subprocess")
+                except subprocess.CalledProcessError as e:
+                    print("error setting CPU affinity, likely a race condition")
+                    print(e.output)
+                    qemu_process.kill()
+                    qemu_process.wait()
+            qemu_process.wait()
+
     except OSError as e:
         if e.errno == errno.ENOENT:
             print("'qemu-system-x86_64' binary not found. Please install the qemu-system-x86 package.")
@@ -485,6 +509,8 @@ if __name__ == "__main__":
                         help="XEN define configuration script for vif")
     parser.add_argument("--cloud-init-image", action="store",
                         help="Path to the optional cloud-init image that should be attached to the instance")
+    parser.add_argument("--qemu-affinity-args", action="store",
+                        help="arguments to qemu-affinity script")
     cmdargs = parser.parse_args()
     cmdargs.opt_path = "debug" if cmdargs.debug else "release" if cmdargs.release else "last"
     cmdargs.image_file = os.path.abspath(cmdargs.image or "build/%s/usr.img" % cmdargs.opt_path)
