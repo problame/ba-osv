@@ -19,12 +19,14 @@
 #include <osv/mutex.h>
 #include <atomic>
 #include "osv/lockless-queue.hh"
+#include "lockfree/queue-mpsc-intrusive.hh"
 #include <list>
 #include <memory>
 #include <vector>
 #include <osv/rcu.hh>
 #include <osv/clock.hh>
 #include <osv/timer-set.hh>
+#include <osv/stagesched.h>
 
 typedef float runtime_t;
 
@@ -332,6 +334,8 @@ public:
         prestarted,
         unstarted,
         waiting,
+        stagemig,
+        stagemig_comp,
         sending_lock,
         running,
         queued,
@@ -519,7 +523,7 @@ private:
             unsigned allowed_initial_states_mask = 1 << unsigned(status::waiting));
     static void sleep_impl(timer &tmr);
     void main();
-    void switch_to();
+    void switch_to(bool complete_stage_migration = false);
     void switch_to_first();
     void prepare_wait();
     void wait();
@@ -575,10 +579,14 @@ private:
     //   waiting       sending_lock async    wake_lock()   used for ensuring the thread does not wake
     //                                                     up while we call receive_lock()
     //
+    //   stagemig      stagemig_comp ?       thread::switch_to() after stage::enqueue()
+    //   stagemig_comp queued        ?       stage::dequeue()
+    //
     //   sending_lock  waking       async    mutex::unlock()
     //
     //   running       waiting      sync     prepare_wait()
     //   running       queued       sync     context switch
+    //   running       stagemig     sync     stage::enqueue()
     //   running       terminating  sync     destroy()      thread function completion
     //
     //   queued        running      sync     context switch
@@ -621,6 +629,7 @@ private:
     friend void thread_main_c(thread* t);
     friend class wait_guard;
     friend struct cpu;
+    friend class stage;
     friend class timer;
     friend struct arch_cpu;
     friend void migrate_enable();
@@ -633,6 +642,8 @@ public:
     bi::list_member_hook<> _runqueue_link;
     // see cpu class
     lockless_queue_link<thread> _wakeup_link;
+    // see cpu class
+    thread *_stagesched_incoming_link;
     static unsigned long _s_idgen;
     static thread *find_by_id(unsigned int id);
 
@@ -671,6 +682,7 @@ public:
                     std::memory_order_relaxed);
         }
         friend class cpu;
+        friend class stage;
         friend class thread;
     };
     stat_counter stat_switches;
@@ -757,6 +769,7 @@ struct cpu : private timer_base::client {
     typedef lockless_queue<thread, &thread::_wakeup_link> incoming_wakeup_queue;
     cpu_set incoming_wakeups_mask;
     incoming_wakeup_queue* incoming_wakeups;
+    lockfree::queue_mpsc_intrusive<thread, &thread::_stagesched_incoming_link> stagesched_incoming = {};
     thread* terminating_thread;
     osv::clock::uptime::time_point running_since;
     char* percpu_base;
@@ -777,8 +790,12 @@ struct cpu : private timer_base::client {
      *
      * Tries to choose a different thread to run instead of the current one
      * on the current CPU from its runqueue.
+     *
+     * @param complete_stage_migration If true, complete a stage migration
+     *       by setting _detached_state.st of the calling thread to status::stagemig_comp
+     *       _after_ performing the thread switch.
      */
-    void reschedule_from_interrupt();
+    void reschedule_from_interrupt(bool complete_stage_migration = false);
     void enqueue(thread& t);
     void init_idle_thread();
     virtual void timer_fired() override;

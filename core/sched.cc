@@ -228,12 +228,15 @@ void cpu::schedule()
     }
 }
 
-void cpu::reschedule_from_interrupt()
+void cpu::reschedule_from_interrupt(bool complete_stage_migration)
 {
     trace_sched_sched();
     assert(sched::exception_depth <= 1);
     need_reschedule = false;
     handle_incoming_wakeups();
+    if (!complete_stage_migration) {
+        stage::dequeue();
+    }
 
     auto now = osv::clock::uptime::now();
     auto interval = now - running_since;
@@ -248,23 +251,43 @@ void cpu::reschedule_from_interrupt()
 
     const auto p_status = p->_detached_state->st.load();
     assert(p_status != thread::status::queued);
+    assert(!complete_stage_migration || p_status == thread::status::stagemig);
 
     p->_total_cpu_time += interval;
 
     if (p_status == thread::status::running) {
         if (runqueue.empty()) {
-            // p is still runnable and the only thread around, keep it running
+            /* we are the idle thread, let it run */
             return;
         }
+        /* TODO work-conservation for running threads
+         *
+         * we should give global stage scheduling an opportunity to balance load
+         * between CPUs by enqueing this thread into it's _detached_state->_stage
+         */
         p->_detached_state->st.store(thread::status::queued);
         trace_sched_preempt();
         p->stat_preemptions.incr();
         enqueue(*p);
-    } else {
-        // p is not runnable, don't enqueue it
+    } else if(p_status != thread::status::stagemig) {
+        /* TODO work-conservation for blocking threads
+         *
+         * p is not runnable and not in flight for stage migration
+         *
+         * once it unblocks, it will be woken up on its detached_state cpu (this one)
+         * via the wake_impl + handle_incoming_wakeups duo
+         *
+         * however, the stage scheduler should dispatch this unblocked thread
+         * to ensure work-conservation
+         *
+         * When implementing this feature
+         *  - try to de-duplicate the code for status::running above
+         *  - take a look at how timers are implemented
+         **/
     }
 
-    // Find new thread
+    /* Find a new thread from CPU-local runqueue
+     * (system threads + already dequeued stage-aware threads) */
     auto ni = runqueue.begin();
     auto n = &*ni;
     runqueue.erase(ni);
@@ -288,7 +311,7 @@ void cpu::reschedule_from_interrupt()
     if (lazy_flush_tlb.exchange(false, std::memory_order_seq_cst)) {
         mmu::flush_tlb_local();
     }
-    n->switch_to();
+    n->switch_to(complete_stage_migration);
 
     // Note: after the call to n->switch_to(), we should no longer use any of
     // the local variables, nor "this" object, because we just switched to n's
@@ -342,6 +365,7 @@ void cpu::do_idle()
             for (unsigned ctr = 0; ctr < 10000; ++ctr) {
                 // FIXME: can we pull threads from loaded cpus?
                 handle_incoming_wakeups();
+                stage::dequeue();
                 if (!runqueue.empty()) {
                     return;
                 }
@@ -349,12 +373,19 @@ void cpu::do_idle()
         }
         std::unique_lock<irq_lock_type> guard(irq_lock);
         handle_incoming_wakeups();
+        stage::dequeue();
         if (!runqueue.empty()) {
             return;
         }
         guard.release();
+        /* FIXME: wait on enqueues using mwait(cpu::current()->stagesched_incoming)
+         * (maybe make it a param of stage::dequeue())?
+         * (or one of queue_mpsc_intrusive)?
+         * wakeups continue to work because IPIs finish mwait (verify this)
+         **/
         arch::wait_for_interrupt(); // this unlocks irq_lock
         handle_incoming_wakeups();
+        stage::dequeue();
     } while (runqueue.empty());
 }
 
@@ -426,6 +457,106 @@ unsigned cpu::load()
 {
     return runqueue.size();
 }
+
+stage* stage::define(const std::string name) {
+
+    static mutex _stages_mtx;
+    static stage stages[stage::max_stages];
+    static int stages_next;
+
+    std::lock_guard<mutex> guard(_stages_mtx);
+
+    if (stages_next == stage::max_stages)
+        return nullptr;
+
+    auto& next = stages[stages_next];
+    next._id = stages_next;
+    stages_next++;
+    next._name = name;
+
+    return &next;
+}
+
+void stage::enqueue()
+{
+    cpu *target_cpu = sched::cpus[_id]; // TODO policy
+
+    /* prohibit migration of this thread off this cpu */
+    irq_save_lock_type irq_lock;
+    std::lock_guard<irq_save_lock_type> guard(irq_lock);
+
+    cpu *source_cpu = cpu::current();
+    thread *t = thread::current();
+
+    // must be called from a thread executing on a CPU
+    assert(t->_runqueue_link.is_linked() == false);
+    //must be called from a runnable thread
+    assert(t->_detached_state->st.load() == thread::status::running);
+
+    if (target_cpu->id == source_cpu->id) {
+        source_cpu->reschedule_from_interrupt(); // releases guard
+        return;
+    }
+
+    t->_detached_state->st.store(thread::status::stagemig);
+
+    /* status::stagemig prohibits target_cpu from executing current thread
+       which is critical because we are still executing it right now on this cpu */
+
+    /* thread migration code adopted + extended from thread::pin */
+    trace_sched_migrate(t, target_cpu->id);
+    t->stat_migrations.incr();
+    t->suspend_timers();
+    t->_detached_state->_cpu = target_cpu;
+    percpu_base = target_cpu->percpu_base;
+    current_cpu = target_cpu;
+
+    // enqueue as late as possible to minimize the time c is in status::stagemig
+    // but target_cpu->stagesched_incoming avoid target_cpu
+    target_cpu->stagesched_incoming.push(t);
+
+    /* find another thread to run on source_cpu and make sure that c is marked
+     * runnable once source_cpu doesn't execute it anymore so that target_cpu
+     * stops re-enqueuing it to its stagesched_incoming
+     */
+    source_cpu->reschedule_from_interrupt(true); // releases guard
+
+    /* from here on, the calling thread is in target_cpu->stagesched_incoming
+       or already in target_cpu->runqueue */
+}
+
+void stage::dequeue()
+{
+
+    /* prohibit migration of this thread off this cpu while dequeuing */
+    irq_save_lock_type irq_lock;
+    std::lock_guard<irq_save_lock_type> guard(irq_lock);
+
+    auto inq = &cpu::current()->stagesched_incoming;
+
+    /* fully drain inq
+     * FIXME the runtime of the loop is unbounded.
+     *       can only fix this once do_idle uses mwait */
+    thread *t;
+    while ((t = inq->pop()) != nullptr) {
+        auto state = t->_detached_state->st.load();
+        if (state == thread::status::stagemig_comp) {
+            t->_detached_state->st.store(thread::status::queued);
+            cpu::current()->enqueue(*t);
+        } else {
+            /* This situation is unlikely:
+             * t's source CPU has not completed the context switch yet.
+             * The source_cpu is likely somewhere between stagesched_incoming.push() and
+             * thread::switch_to's */
+            assert(state == thread::status::stagemig);
+            inq->push(t);
+            /* When we pop t the next time, it will probably be status::stagemig_comp
+             * so busy waiting is bounded here. */
+        }
+    }
+
+}
+
 
 // function to pin the *current* thread:
 void thread::pin(cpu *target_cpu)

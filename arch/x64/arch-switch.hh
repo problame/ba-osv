@@ -43,7 +43,7 @@ void (*resolve_set_fsbase(void))(u64 v)
 
 void set_fsbase(u64 v) __attribute__((ifunc("resolve_set_fsbase")));
 
-void thread::switch_to()
+void thread::switch_to(bool complete_stage_migration)
 {
     thread* old = current();
     // writing to fs_base invalidates memory accesses, so surround with
@@ -57,21 +57,43 @@ void thread::switch_to()
     c->arch.set_exception_stack(_state.exception_stack);
     auto fpucw = processor::fnstcw();
     auto mxcsr = processor::stmxcsr();
+
+    /* When completing stage migration, the old thread must have status::stagemig.
+       When not completing stage migration, we shouldn't do anything. */
+    static_assert(sizeof(old->_detached_state->st) == 4,
+            "switch_to performs the equivalent of "
+            "a.compare_exchange_strong(cmp_old_status, status::running) "
+            "but without touching the stack");
+    static_assert(sizeof(status::stagemig_comp) == 4);
     asm volatile
-        ("mov %%rbp, %c[rbp](%0) \n\t"
-         "movq $1f, %c[rip](%0) \n\t"
-         "mov %%rsp, %c[rsp](%0) \n\t"
-         "mov %c[rsp](%1), %%rsp \n\t"
-         "mov %c[rbp](%1), %%rbp \n\t"
-         "jmpq *%c[rip](%1) \n\t"
+        (
+         "mov %%rbp, %c[rbp](%[ost]) \n\t"
+         "movq $1f, %c[rip](%[ost]) \n\t"
+         "mov %%rsp, %c[rsp](%[ost]) \n\t"
+         "cmp $0, %%rax\n\t"
+         "je switch \n\t"
+         "lock xchg %%edx, (%%rsi)\n\t" // use 32bit regs because sizeof(_detached_state->st) == 4
+         "switch: \n\t"
+         "mov %c[rsp](%[nst]), %%rsp \n\t"
+         "mov %c[rbp](%[nst]), %%rbp \n\t"
+         "jmpq *%c[rip](%[nst]) \n\t"
          "1: \n\t"
+         // NOTE: register allocation is done manually using constraints (had errors on gcc 7.2.1)
          :
-         : "a"(&old->_state), "c"(&this->_state),
+         : "S"(&old->_detached_state->st), // rsi/esi
+           [ost]"b"(&old->_state), // rbx/ebx
+           [nst]"c"(&this->_state), // rcx/ecx
            [rsp]"i"(offsetof(thread_state, rsp)),
            [rbp]"i"(offsetof(thread_state, rbp)),
-           [rip]"i"(offsetof(thread_state, rip))
-         : "rbx", "rdx", "rsi", "rdi", "r8", "r9",
-           "r10", "r11", "r12", "r13", "r14", "r15", "memory");
+           [rip]"i"(offsetof(thread_state, rip)),
+           "a"(complete_stage_migration ? 1 : 0),
+           "d"(status::stagemig_comp) //rdx/edx
+         : // used above: rax, rbx, rcx, rdx, rsi
+           "rdi", "r8", "r9",
+           "r10", "r11", "r12", "r13", "r14", "r15",
+           "memory", // we switch the stack
+           "cc" // cmpxchg clobbers flags register
+               );
     processor::fldcw(fpucw);
     processor::ldmxcsr(mxcsr);
 }
