@@ -10,23 +10,21 @@ import re
 import shlex
 import time
 
-stty_params = None
-
 devnull = open('/dev/null', 'w')
 
-def stty_save():
-    global stty_params
-    p = subprocess.Popen(["stty", "-g"], stdout=subprocess.PIPE, stderr=devnull)
-    stty_params, err = p.communicate()
-    stty_params = stty_params.strip()
+class stty_save_context(object):
 
-def stty_restore():
-    if stty_params:
-        subprocess.call(["stty", stty_params], stderr=devnull)
+    def __init__(self):
+        self.stty_params = None
 
-def cleanups():
-    "cleanups after execution"
-    stty_restore()
+    def __enter__(self):
+        p = subprocess.Popen(["stty", "-g"], stdout=subprocess.PIPE, stderr=devnull)
+        self.stty_params, err = p.communicate()
+        self.stty_params = self.stty_params.strip()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        subprocess.call(["stty", self.stty_params], stderr=devnull)
+
 
 def format_args(args):
     def format_arg(arg):
@@ -194,20 +192,21 @@ def start_osv_qemu(options):
     for a in options.pass_args or []:
         args += a.split()
 
-    try:
-        # Save the current settings of the stty
-        stty_save()
 
-        # Launch qemu
+    with stty_save_context() as stty_ctx:
+
         qemu_env = os.environ.copy()
 
         qemu_env['OSV_BRIDGE'] = options.bridge
         cmdline = [options.qemu_path] + args
         if options.dry_run:
-            print(format_args(cmdline))
-        else:
+             print(format_args(cmdline))
+             return
+
+        try:
             qemu_process = subprocess.Popen(cmdline, env=qemu_env)
             print("qemu_process.pid = {0}".format(qemu_process.pid))
+
             if options.qemu_affinity_args:
                 qemu_affinity_args = shlex.split(options.qemu_affinity_args)
                 qemu_affinity_args += ["--", "{0}".format(qemu_process.pid)]
@@ -219,21 +218,29 @@ def start_osv_qemu(options):
                     output = subprocess.check_output(qemu_affinity_args, stderr=subprocess.PIPE)
                     print(output)
                     print("finished qemu-affinity subprocess")
-                except subprocess.CalledProcessError as e:
+                except CalledProcessError as e:
                     print("error setting CPU affinity, likely a race condition")
                     print(e.output)
-                    qemu_process.kill()
-                    qemu_process.wait()
+                    raise e
+
             qemu_process.wait()
 
-    except OSError as e:
-        if e.errno == errno.ENOENT:
-            print("'qemu-system-x86_64' binary not found. Please install the qemu-system-x86 package.")
-        else:
-            print("OS error({0}): \"{1}\" while running qemu-system-x86_64 {2}".
-                format(e.errno, e.strerror, " ".join(args)))
-    finally:
-        cleanups()
+        except OSError as e:
+            if e.errno == errno.ENOENT:
+                print("'qemu-system-x86_64' binary not found. Please install the qemu-system-x86 package.")
+            else:
+                print("OS error({0}): \"{1}\" while running qemu-system-x86_64 {2}".
+                    format(e.errno, e.strerror, " ".join(args)))
+
+            print("killing qemu process")
+            qemu_process.kill()
+            qemu_process.wait()
+
+        except Exception as e:
+            print("exception while running qemu: {0}".format(e))
+            print("killing qemu process")
+            qemu_process.kill()
+            qemu_process.wait()
 
 def start_osv_xen(options):
     if options.hypervisor == "xen":
@@ -301,28 +308,26 @@ def start_osv_xen(options):
     xenfile.writelines("%s\n" % item for item in args)
     xenfile.flush()
 
-    try:
-        # Save the current settings of the stty
-        stty_save()
+    with stty_save_context() as stty_ctx:
 
-        #create a loop device backed by image file
-        subprocess.call(["losetup", "/dev/loop%s" % os.getpid(), options.image_file])
-        # Launch qemu
-        cmdline = ["xl", "create"]
-        if not options.detach:
-            cmdline += ["-c"]
-        cmdline += [xenfile.name]
-        if options.dry_run:
-            print(format_args(cmdline))
-        else:
-            subprocess.call(cmdline)
-    except:
-        pass
-    finally:
-        xenfile.close()
-        #delete loop device
-        subprocess.call(["losetup", "-d", "/dev/loop%s" % os.getpid()])
-        cleanups()
+        try:
+
+            #create a loop device backed by image file
+            subprocess.call(["losetup", "/dev/loop%s" % os.getpid(), options.image_file])
+            # Launch qemu
+            cmdline = ["xl", "create"]
+            if not options.detach:
+                cmdline += ["-c"]
+            cmdline += [xenfile.name]
+            if options.dry_run:
+                print(format_args(cmdline))
+            else:
+                subprocess.call(cmdline)
+        except:
+            #delete loop device
+            subprocess.call(["losetup", "-d", "/dev/loop%s" % os.getpid()])
+
+    xenfile.close()
 
 def start_osv_vmware(options):
     args = [
@@ -397,7 +402,6 @@ def start_osv_vmware(options):
         pass
     finally:
         vmxfile.close()
-        cleanups()
 
 def start_osv(options):
     launchers = {
