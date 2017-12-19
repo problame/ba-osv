@@ -205,25 +205,29 @@ def start_osv_qemu(options):
 
         try:
             qemu_process = subprocess.Popen(cmdline, env=qemu_env)
-            print("qemu_process.pid = {0}".format(qemu_process.pid))
+            print("qemu_process.pid = {}".format(qemu_process.pid))
 
             if options.qemu_affinity_args:
                 qemu_affinity_args = shlex.split(options.qemu_affinity_args)
-                qemu_affinity_args += ["--", "{0}".format(qemu_process.pid)]
+                qemu_affinity_args += ["--", "{}".format(qemu_process.pid)]
                 qemu_affinity_args = ["python3", "external/scripts/qemu-affinity/qemu_affinity.py"] + qemu_affinity_args
                 try:
                     print("waiting for qemu to set up vcpus, FIXME using sleep()")
                     time.sleep(1)
                     print("starting qemu-affinity subprocess: {0}".format(qemu_affinity_args))
-                    output = subprocess.check_output(qemu_affinity_args, stderr=subprocess.PIPE)
+                    output = subprocess.check_output(qemu_affinity_args, stderr=subprocess.STDOUT)
                     print(output)
                     print("finished qemu-affinity subprocess")
-                except CalledProcessError as e:
+                except subprocess.CalledProcessError as e:
                     print("error setting CPU affinity, likely a race condition")
                     print(e.output)
                     raise e
 
-            qemu_process.wait()
+            try:
+                qemu_process.wait()
+            except:
+                qemu_process.kill()
+                qemu_process.wait()
 
         except OSError as e:
             if e.errno == errno.ENOENT:
@@ -232,12 +236,6 @@ def start_osv_qemu(options):
                 print("OS error({0}): \"{1}\" while running qemu-system-x86_64 {2}".
                     format(e.errno, e.strerror, " ".join(args)))
 
-            print("killing qemu process")
-            qemu_process.kill()
-            qemu_process.wait()
-
-        except Exception as e:
-            print("exception while running qemu: {0}".format(e))
             print("killing qemu process")
             qemu_process.kill()
             qemu_process.wait()
