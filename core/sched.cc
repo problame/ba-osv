@@ -288,11 +288,19 @@ void cpu::reschedule_from_interrupt(bool complete_stage_migration)
 
     /* Find a new thread from CPU-local runqueue
      * (system threads + already dequeued stage-aware threads) */
+dequeue:
     auto ni = runqueue.begin();
     auto n = &*ni;
     runqueue.erase(ni);
-    n->cputime_estimator_set(now, n->_total_cpu_time);
     assert(n->_detached_state->st.load() == thread::status::queued);
+    if (runqueue.size() >= 2 && n == idle_thread) {
+        /* Poor-man's thread priorities */
+        enqueue(*n);
+        goto dequeue;
+        return;
+    }
+
+    n->cputime_estimator_set(now, n->_total_cpu_time);
 
     if (n == idle_thread) {
         trace_sched_idle();
