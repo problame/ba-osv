@@ -1,0 +1,7 @@
+# build artifacts
+
+**/*.o
+**/*.so
+cs_microbench
+usr.manifest
+build.h

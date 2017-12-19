@@ -1,0 +1,9 @@
+#!/bin/bash
+
+# a helper to execute microbenchmarks using libfakestd and niced on a Linux system
+
+cd "$(dirname $0)"
+export LD_LIBRARY_PATH=$(readlink -f libfakestd)
+
+exec nice -n -20 ./cs_microbench $@
+
