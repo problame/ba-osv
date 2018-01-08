@@ -551,6 +551,7 @@ void stage::dequeue()
         if (state == thread::status::stagemig_comp) {
             t->_detached_state->st.store(thread::status::queued);
             cpu::current()->enqueue(*t);
+            t->resume_timers();
         } else {
             /* This situation is unlikely:
              * t's source CPU has not completed the context switch yet.
