@@ -1,15 +1,15 @@
 
 CXX := g++
-CXXFLAGS := -fPIC -I../../../include
+CXXFLAGS := -fPIC -I../include
 
 OBJS += stagesched.o
 
-HEADERS += ../../../include/osv/stagesched.h
+HEADERS += ../include/osv/stagesched.h
 
-libfakestd.so: $(OBJS)
+libfakeosv.so: $(OBJS)
 	$(CXX) -shared -lpthread -o $@ $(OBJS)
 
-libfakestd.a: $(OBJS)
+libfakeosv.a: $(OBJS)
 	ar rcs $@ $(OBJS)
 
 %.o: %.cc $(HEADERS)

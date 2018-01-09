@@ -1,4 +1,5 @@
 TARGET=cs_microbench
+LIBFAKEOSVDIR=../../libfakeosv
 
 .PHONY: module
 module: $(TARGET).so $(TARGET) usr.manifest
@@ -22,12 +23,8 @@ HEADERS += histogram.hh
 $(TARGET).so: $(OBJS)
 	$(CXX) -shared -o $@ $(LDFLAGS) $(OBJS)
 
-$(TARGET): $(OBJS) $(TARGET).so libfakestd/libfakestd.so
-	$(CXX) -o $@ $(LDFLAGS) -L./libfakestd -lfakestd $(OBJS)
-
-.PHONY: libfakestd/libfakestd.so
-libfakestd/libfakestd.so:
-	make -C libfakestd libfakestd.so
+$(TARGET): $(OBJS) $(TARGET).so $(LIBFAKEOSVDIR)/libfakeosv.so
+	$(CXX) -o $@ $(LDFLAGS) -L./$(LIBFAKEOSVDIR) -lfakeosv $(OBJS)
 
 .PHONY: usr.manifest
 usr.manifest:
@@ -43,11 +40,10 @@ build.h:
 
 .PHONY: run
 run_linux: $(TARGET)
-	LD_LIBRARY_PATH=libfakestd ./$(TARGET)
+	LD_LIBRARY_PATH=$(LIBFAKEOSVDIR) ./$(TARGET)
 
 .PHONY: clean
 clean:
-	make -C libfakestd clean
 	rm -f *.o
 	rm -f $(TARGET)
 	rm -f $(TARGET).so
