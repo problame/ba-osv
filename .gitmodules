@@ -38,6 +38,9 @@
 [submodule "modules/httpserver/swagger-ui"]
 	path = modules/httpserver-html5-gui/swagger-ui
 	url = ../../cloudius-systems/swagger-ui.git
+[submodule "modules/mysql_stagesched/src"]
+	path = modules/mysql_stagesched/src
+    url = ../../cschwarz/mysql_stagesched
 [submodule "musl"]
 	path = musl
 	url = ../../cloudius-systems/musl.git
