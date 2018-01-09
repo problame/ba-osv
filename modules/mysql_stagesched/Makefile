@@ -55,7 +55,8 @@ build.depend:
 		-DWITH_EMBEDDED_SHARED_LIBRARY=OFF \
 		-DWITH_MYSQLD_LDFLAGS="-pie" \
 		$(SRCDIR)
-	$(MAKE) -C $(BUILDDIR)
+	LD_LIBRARY_PATH=$(LIBFAKESTDDIR) \
+		$(MAKE) -C $(BUILDDIR)
 	touch build.depend
 	
 .PHONY: clean
