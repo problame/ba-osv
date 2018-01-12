@@ -63,6 +63,9 @@ TRACEPOINT(trace_timer_reset, "timer=%p time=%d", timer_base*, s64);
 TRACEPOINT(trace_timer_cancel, "timer=%p", timer_base*);
 TRACEPOINT(trace_timer_fired, "timer=%p", timer_base*);
 TRACEPOINT(trace_thread_create, "thread=%p", thread*);
+TRACEPOINT(trace_sched_stage_enqueue, "stage=%p scpu=%d tcpu=%d thread=%p", stage*, unsigned, unsigned, thread*);
+TRACEPOINT(trace_sched_stage_dequeue, "dcpu=%d thread=%p", unsigned, thread*);
+TRACEPOINT(trace_sched_stage_dequeue_stagemig, "dcpu=%d thread=%p", unsigned, thread*);
 
 std::vector<cpu*> cpus __attribute__((init_priority((int)init_prio::cpus)));
 
@@ -496,6 +499,8 @@ void stage::enqueue()
     cpu *source_cpu = cpu::current();
     thread *t = thread::current();
 
+    trace_sched_stage_enqueue(this, source_cpu->id, target_cpu->id, t);
+
     // must be called from a thread executing on a CPU
     assert(t->_runqueue_link.is_linked() == false);
     //must be called from a runnable thread
@@ -512,7 +517,6 @@ void stage::enqueue()
        which is critical because we are still executing it right now on this cpu */
 
     /* thread migration code adopted + extended from thread::pin */
-    trace_sched_migrate(t, target_cpu->id);
     t->stat_migrations.incr();
     t->suspend_timers();
     t->_detached_state->_cpu = target_cpu;
@@ -550,6 +554,7 @@ void stage::dequeue()
         auto state = t->_detached_state->st.load();
         if (state == thread::status::stagemig_comp) {
             t->_detached_state->st.store(thread::status::queued);
+            trace_sched_stage_dequeue(cpu::current()->id, t);
             cpu::current()->enqueue(*t);
             t->resume_timers();
         } else {
@@ -558,6 +563,7 @@ void stage::dequeue()
              * The source_cpu is likely somewhere between stagesched_incoming.push() and
              * thread::switch_to's */
             assert(state == thread::status::stagemig);
+            trace_sched_stage_dequeue_stagemig(cpu::current()->id, t);
             inq->push(t);
             /* When we pop t the next time, it will probably be status::stagemig_comp
              * so busy waiting is bounded here. */
