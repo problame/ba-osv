@@ -11,6 +11,7 @@ LDFLAGS += -lpthread -lboost_program_options
 OBJS += main.o
 OBJS += hopper.o
 OBJS += cachestress.o
+OBJS += ithrash.o
 OBJS += icachelatency.o
 OBJS += stagel1i.o
 # cachestress code only works with O0

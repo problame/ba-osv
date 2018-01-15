@@ -119,6 +119,8 @@ int main(int argc, char *argv[]) {
         bench = unique_ptr<Hopper>(new Hopper());
     else if (o.microbenchmark == "cachestress")
         bench = unique_ptr<Cachestress>(new Cachestress());
+    else if (o.microbenchmark == "ithrash")
+        bench = unique_ptr<IThrash>(new IThrash());
     else if (o.microbenchmark == "icachelatency")
         bench = unique_ptr<ICacheLatency>(new ICacheLatency());
     else if (o.microbenchmark == "stagel1i")
