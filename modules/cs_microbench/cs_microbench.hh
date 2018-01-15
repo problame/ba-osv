@@ -20,5 +20,16 @@ namespace cs_microbench {
             int run(bench_args_type args);
     };
 
+    class ICacheLatency: public Microbenchmark {
+        public:
+            int run(bench_args_type args);
+    };
+
+    class StageL1I: public Microbenchmark {
+        public:
+            int run(bench_args_type args);
+    };
+
+
 
 }

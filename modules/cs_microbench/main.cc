@@ -119,6 +119,10 @@ int main(int argc, char *argv[]) {
         bench = unique_ptr<Hopper>(new Hopper());
     else if (o.microbenchmark == "cachestress")
         bench = unique_ptr<Cachestress>(new Cachestress());
+    else if (o.microbenchmark == "icachelatency")
+        bench = unique_ptr<ICacheLatency>(new ICacheLatency());
+    else if (o.microbenchmark == "stagel1i")
+        bench = unique_ptr<StageL1I>(new StageL1I());
     else
         throw runtime_error("unknown microbenchmark " + o.microbenchmark);
 

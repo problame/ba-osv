@@ -11,14 +11,18 @@ LDFLAGS += -lpthread -lboost_program_options
 OBJS += main.o
 OBJS += hopper.o
 OBJS += cachestress.o
+OBJS += icachelatency.o
+OBJS += stagel1i.o
 # cachestress code only works with O0
 cachestress.o: CXXFLAGS += -O0
+icachelatency.o: CXXFLAGS += -O0
 
 
 HEADERS += ../../include/osv/stagesched.h
 # HEADERS += build.h not included on purpose because it is re-generated every time
 HEADERS += cs_microbench.hh
 HEADERS += histogram.hh
+HEADERS += work.hh
 
 $(TARGET).so: $(OBJS)
 	$(CXX) -shared -o $@ $(LDFLAGS) $(OBJS)
