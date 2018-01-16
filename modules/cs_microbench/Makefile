@@ -20,10 +20,12 @@ icachelatency.o: CXXFLAGS += -O0
 
 
 HEADERS += ../../include/osv/stagesched.h
-# HEADERS += build.h not included on purpose because it is re-generated every time
 HEADERS += cs_microbench.hh
 HEADERS += histogram.hh
 HEADERS += work.hh
+
+SCM_VERSION ?= $(shell git describe --tags --dirty)
+CXXFLAGS += -D SCM_VERSION=\"$(SCM_VERSION)\"
 
 $(TARGET).so: $(OBJS)
 	$(CXX) -shared -o $@ $(LDFLAGS) $(OBJS)
@@ -37,11 +39,6 @@ usr.manifest:
 
 $(OBJS): %.o: %.cc $(HEADERS)
 	$(CXX) $(CXXFLAGS) -c $<
-
-.PHONY: build.h
-build.h:
-	echo -n > $@
-	echo "#define SCM_VERSION \"$$(git describe --tags --dirty)\"" >> $@
 
 .PHONY: run
 run_linux: $(TARGET)

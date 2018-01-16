@@ -4,4 +4,3 @@
 **/*.so
 cs_microbench
 usr.manifest
-build.h
