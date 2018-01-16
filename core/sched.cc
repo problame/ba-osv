@@ -468,7 +468,10 @@ stage* stage::define(const std::string name) {
 }
 
 cpu *stage::enqueue_policy() {
-    return sched::cpus[_id]; // TODO policy
+    // each stage has 2 cpus
+    // pick the cpu that has fewer threads
+    auto cs = sched::cpus.begin() + _id;
+    return *std::min_element(cs, cs+2, [](cpu *a, cpu *b) { return a->runqueue.size() < b->runqueue.size(); ; });
 }
 
 void stage::enqueue()
