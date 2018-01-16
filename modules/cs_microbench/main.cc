@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "cs_microbench.hh"
+#include "build.h"
 
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/variables_map.hpp>

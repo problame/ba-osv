@@ -23,9 +23,9 @@ HEADERS += ../../include/osv/stagesched.h
 HEADERS += cs_microbench.hh
 HEADERS += histogram.hh
 HEADERS += work.hh
+HEADERS += build.h
 
-SCM_VERSION ?= $(shell git describe --tags --dirty)
-CXXFLAGS += -D SCM_VERSION=\"$(SCM_VERSION)\"
+$(shell ./genbuild.sh)
 
 $(TARGET).so: $(OBJS)
 	$(CXX) -shared -o $@ $(LDFLAGS) $(OBJS)
@@ -46,6 +46,7 @@ run_linux: $(TARGET)
 
 .PHONY: clean
 clean:
+	rm -f build.h
 	rm -f *.o
 	rm -f $(TARGET)
 	rm -f $(TARGET).so
