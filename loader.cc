@@ -178,6 +178,7 @@ void parse_options(int loader_argc, char** loader_argv)
         ("delay", bpo::value<float>()->default_value(0), "delay in seconds before boot")
         ("redirect", bpo::value<std::string>(), "redirect stdout and stderr to file")
         ("stage.max_assignment_age", bpo::value<int>(), "")
+        ("idle_mwait", bpo::value<int>(), "use mwait in cpu::do_idle")
     ;
     bpo::variables_map vars;
     // don't allow --foo bar (require --foo=bar) so we can find the first non-option
@@ -292,6 +293,10 @@ void parse_options(int loader_argc, char** loader_argv)
 
     if (vars.count("stage.max_assignment_age")) {
         sched::stage::max_assignment_age = vars["stage.max_assignment_age"].as<int>();
+    }
+
+    if (vars.count("idle_mwait")) {
+        sched::cpu::idle_mwait = vars["idle_mwait"].as<int>() != 0;
     }
 
     boot_delay = std::chrono::duration_cast<std::chrono::nanoseconds>(1_s * vars["delay"].as<float>());

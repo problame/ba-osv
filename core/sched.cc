@@ -393,14 +393,20 @@ void cpu::idle_poll_end()
     std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
+bool cpu::idle_mwait = true;
+
 void cpu::do_idle()
 {
     do {
-        // FIXME: mwait on stagesched_incoming, see mwait branch
         handle_incoming_wakeups();
         stage::dequeue();
         if (!runqueue.empty()) {
-            return;
+            break;
+        }
+        if (cpu::idle_mwait) {
+            static_assert(sizeof(cpu::current()->incoming_wakeups_mask) == 8);
+            arch::monitor(&cpu::current()->incoming_wakeups_mask, 0, 0);
+            arch::mwait(0, 0);
         }
     } while (runqueue.empty());
 }
@@ -896,6 +902,7 @@ void stage::enqueue()
     // enqueue as late as possible to minimize the time c is in status::stagemig
     // but target_cpu->stagesched_incoming avoid target_cpu
     target_cpu->stagesched_incoming.push(t);
+    target_cpu->incoming_wakeups_mask.set(source_cpu->id);
 
     /* find another thread to run on source_cpu and make sure that c is marked
      * runnable once source_cpu doesn't execute it anymore so that target_cpu
