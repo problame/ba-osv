@@ -6,7 +6,6 @@
 #include <exception>
 #include <memory>
 
-#include "build.h"
 #include "cs_microbench.hh"
 
 #include <boost/program_options/options_description.hpp>
@@ -26,6 +25,7 @@ namespace bmr {
 
     typedef std::function<int()> benchmark_function;
 
+    // FIXME refactor socket client code into C++ class
     class client {
 
         private:
@@ -51,6 +51,7 @@ namespace bmr {
                     perror("error socket\n");
                     return -1;
                 }
+                cout << "connecting to bmrserver\n";
                 if (connect(sock, (const sockaddr*)&_host, sizeof(_host))) {
                     perror("error connecting to benchmark runner");
                     return -1;
@@ -73,7 +74,7 @@ namespace bmr {
                     perror("error sending result message to benchmark runner");
                     return -1;
                 }
-                shutdown(sock, SHUT_RDWR);
+                close(sock);
                 return 0;
             };
 
