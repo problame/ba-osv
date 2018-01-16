@@ -24,8 +24,8 @@ usr.manifest: install
 .PHONY: install reinstall
 install: install.depend
 reinstall:
-	rm install.depend
-	make install
+	rm -f install.depend
+	$(MAKE) install
 
 install.depend: build.depend $(LIBFAKEOSV)
 	rm -rf $(ROOTDIR)
