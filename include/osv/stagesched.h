@@ -13,6 +13,8 @@
 
 namespace sched {
 
+    struct cpu;
+
     /**
      * Abstraction for stage-aware scheduling
      *
@@ -38,7 +40,7 @@ namespace sched {
              */
             void enqueue();
 
-            /**
+            /** FIXME: should be private
              * Dequeue runnable threads into the calling cpu's runqueue.
              *
              * The policy which thread in which stage is dequeued is subject
@@ -50,6 +52,8 @@ namespace sched {
             stage() {}
             stage(stage const&) {}
             void operator=(stage const&) {}
+
+            cpu *enqueue_policy();
 
         public:
             static const int max_stages = 32;

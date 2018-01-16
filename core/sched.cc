@@ -467,9 +467,13 @@ stage* stage::define(const std::string name) {
     return &next;
 }
 
+cpu *stage::enqueue_policy() {
+    return sched::cpus[_id]; // TODO policy
+}
+
 void stage::enqueue()
 {
-    cpu *target_cpu = sched::cpus[_id]; // TODO policy
+    cpu *target_cpu = enqueue_policy();
 
     /* prohibit migration of this thread off this cpu */
     irq_save_lock_type irq_lock;
