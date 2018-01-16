@@ -370,33 +370,12 @@ void cpu::send_wakeup_ipi()
 void cpu::do_idle()
 {
     do {
-        idle_poll_lock_type idle_poll_lock{*this};
-        WITH_LOCK(idle_poll_lock) {
-            // spin for a bit before halting
-            for (unsigned ctr = 0; ctr < 10000; ++ctr) {
-                // FIXME: can we pull threads from loaded cpus?
-                handle_incoming_wakeups();
-                stage::dequeue();
-                if (!runqueue.empty()) {
-                    return;
-                }
-            }
-        }
-        std::unique_lock<irq_lock_type> guard(irq_lock);
+        // FIXME: mwait on stagesched_incoming, see mwait branch
         handle_incoming_wakeups();
         stage::dequeue();
         if (!runqueue.empty()) {
             return;
         }
-        guard.release();
-        /* FIXME: wait on enqueues using mwait(cpu::current()->stagesched_incoming)
-         * (maybe make it a param of stage::dequeue())?
-         * (or one of queue_mpsc_intrusive)?
-         * wakeups continue to work because IPIs finish mwait (verify this)
-         **/
-        arch::wait_for_interrupt(); // this unlocks irq_lock
-        handle_incoming_wakeups();
-        stage::dequeue();
     } while (runqueue.empty());
 }
 
