@@ -204,6 +204,13 @@ cscope:
 	@echo cscope index created
 .PHONY: cscope
 
+thread_state.dot: include/osv/sched.hh
+	awk '\
+		/BEGIN THREAD STATE TRANSITION DOT GRAPH/{p=1;} \
+		/END THREAD STATE TRANSITION DOT GRAPH/{p=0;} \
+		//{if (p==1) p = 2; else if (p == 2) print $$0; } \
+		'  include/osv/sched.hh > $@
+
 ###########################################################################
 
 

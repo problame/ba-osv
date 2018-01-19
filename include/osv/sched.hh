@@ -330,16 +330,23 @@ private:
 
 public:
     enum class status {
+        /* Naming Convention:
+         * _run suffix:  thread is still executing on some CPU
+         * _sto suffix: thread completed schedule-out (not running anywhere)
+         */
         invalid,
         prestarted,
         unstarted,
-        waiting,
-        stagemig,
-        stagemig_comp,
-        sending_lock,
+        waiting_run,
+        waiting_sto,
+        stagemig_run,
+        stagemig_sto,
+        sending_lock_run,
+        sending_lock_sto,
         running,
         queued,
-        waking, // between waiting and queued
+        waking_run,
+        waking_sto,
         terminating, // temporary state used in complete()
         terminated,
     };
@@ -520,7 +527,7 @@ public:
      bool unsafe_stop();
 private:
     static void wake_impl(detached_state* st,
-            unsigned allowed_initial_states_mask = 1 << unsigned(status::waiting));
+            unsigned allowed_initial_states_mask = (1 << unsigned(status::waiting_sto)) | (1 << unsigned(status::waiting_run)));
     static void sleep_impl(timer &tmr);
     void main();
     void switch_to();
@@ -565,37 +572,47 @@ private:
     thread_state _state;
     thread_control_block* _tcb;
 
-    // State machine transition matrix
+    // State machine transition matrix for _detached_state->st
     //
-    //   Initial       Next         Async?   Event         Notes
-    //
-    //   unstarted     waiting      sync     start()       followed by wake()
-    //   unstarted     prestarted   sync     start()       before scheduler startup
-    //
-    //   prestarted    unstarted    sync     scheduler startup  followed by start()
-    //
-    //   waiting       waking       async    wake()
-    //   waiting       running      sync     wait_until cancelled (predicate became true before context switch)
-    //   waiting       sending_lock async    wake_lock()   used for ensuring the thread does not wake
-    //                                                     up while we call receive_lock()
-    //
-    //   stagemig      stagemig_comp ?       thread::switch_to() after stage::enqueue()
-    //   stagemig_comp queued        ?       stage::dequeue()
-    //
-    //   sending_lock  waking       async    mutex::unlock()
-    //
-    //   running       waiting      sync     prepare_wait()
-    //   running       queued       sync     context switch
-    //   running       stagemig     sync     stage::enqueue()
-    //   running       terminating  sync     destroy()      thread function completion
-    //
-    //   queued        running      sync     context switch
-    //
-    //   waking        queued       async    scheduler poll of incoming thread wakeup queue
-    //   waking        running      sync     thread pulls self out of incoming wakeup queue
-    //
-    //   terminating   terminated   async    post context switch
-    //
+    /* BEGIN THREAD STATE TRANSITION DOT GRAPH
+    digraph {
+
+       // Notation:
+       // - if no '::' in label, label refers to a member of class thread;
+       // - events occurs asynchronous to thread execution: style=dashed
+
+       unstarted           -> prestarted            [label="start (before sched::init)"]
+       prestarted          -> unstarted             [label="sched::init"]
+
+       unstarted           -> waiting_run           [label="start"];
+
+       running             -> waiting_run           [label="prepare_wait (via wait_guard)"]
+       running             -> queued                [label="schedule"]
+       queued              -> running               [label="cpu::schedule"]
+       running             -> terminating           [label="complete"]
+       terminating         -> terminated            [lamel="schedule & complete"]
+
+       waiting_run         -> sending_lock_run      [label="wake_lock",style=dashed]
+       waiting_run         -> waking_run            [label="wake_impl"];
+       waiting_run         -> waiting_sto           [label="switch_to"]
+       sending_lock_run    -> waking_run            [label="wake_impl",style=dashed]
+       sending_lock_run    -> sending_lock_sto      [label="switch_to"]
+
+       waking_run          -> running               [label="handle_incoming_wakups"]
+       waking_run          -> waking_sto            [label="switch_to"]
+
+       waiting_sto         -> sending_lock_sto      [label="wake_lock",style=dashed]
+       waiting_sto         -> waking_sto            [label="wake_impl",style=dashed]
+       sending_lock_sto    -> waking_sto            [label="wake_impl",style=dashed]
+       waking_sto          -> queued                [label="handle_incoming_wakups",style=dashed]
+
+
+       running             -> stagemig_run			[label="stage::enqueue"]
+       stagemig_run        -> stagemig_sto          [label="switch_to"]
+       stagemig_sto        -> queued                [label="stage::dequeue"]
+
+    }
+    END THREAD STATE TRANSITION DOT GRAPH */
     // wake() on any state except waiting is discarded.
     // part of the thread state is detached from the thread structure,
     // and freed by rcu, so that waking a thread and destroying it can
@@ -799,7 +816,7 @@ struct cpu : private timer_base::client {
      * on the current CPU from its runqueue.
      *
      * @param complete_stage_migration If true, complete a stage migration
-     *       by setting _detached_state.st of the calling thread to status::stagemig_comp
+     *       by setting _detached_state.st of the calling thread to status::stagemig_sto
      *       _after_ performing the thread switch.
      */
     void reschedule_from_interrupt();
@@ -1192,15 +1209,18 @@ template <class Action>
 inline
 void thread::wake_with(Action action)
 {
-    return do_wake_with(action, (1 << unsigned(status::waiting)));
+    return do_wake_with(action, (1 << unsigned(status::waiting_run))
+                               |(1 << unsigned(status::waiting_sto)));
 }
 
 template <class Action>
 inline
 void thread::wake_with_from_mutex(Action action)
 {
-    return do_wake_with(action, (1 << unsigned(status::waiting))
-                              | (1 << unsigned(status::sending_lock)));
+    return do_wake_with(action, (1 << unsigned(status::waiting_run))
+                              | (1 << unsigned(status::waiting_sto))
+                              | (1 << unsigned(status::sending_lock_run))
+                              | (1 << unsigned(status::sending_lock_sto)));
 }
 
 inline
@@ -1212,20 +1232,25 @@ thread::status thread::switch_to_status_transition(status from)
         case status::prestarted:
         case status::queued:
         case status::terminating:
-        case status::waiting:
-        case status::sending_lock:
-        case status::waking:
             return from;
 
         // Handle stage migration from calling thread
-        case status::stagemig:
-            return status::stagemig_comp;
+        case status::stagemig_run:
+            return status::stagemig_sto;
 
-        // Invalid cases
+        // Handle asynchronous events
+        case thread::status::waiting_run:
+            return thread::status::waiting_sto;
+        case status::sending_lock_run:
+            return status::sending_lock_sto;
+        case thread::status::waking_run:
+            // switch_to happens after polling the incoming_wakups queue
+            // We didn't catch the wakup before scheduling out, too bad.
+            return thread::status::waking_sto;
+
         default:
             return status::invalid;
     }
-    return status::invalid;
 }
 
 extern cpu __thread* current_cpu;

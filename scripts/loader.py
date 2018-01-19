@@ -182,9 +182,11 @@ class Connect(gdb.Command):
         global status_enum
         try:
             status_enum.running = gdb.parse_and_eval('sched::thread::status::running')
-            status_enum.waiting = gdb.parse_and_eval('sched::thread::status::waiting')
+            status_enum.waiting_pre = gdb.parse_and_eval('sched::thread::status::waiting_pre')
+            status_enum.waiting_sto = gdb.parse_and_eval('sched::thread::status::waiting_sto')
             status_enum.queued = gdb.parse_and_eval('sched::thread::status::queued')
             status_enum.waking = gdb.parse_and_eval('sched::thread::status::waking')
+            status_enum.waking_comp = gdb.parse_and_eval('sched::thread::status::waking_comp')
         except:
             status_enum.running = gdb.parse_and_eval('sched::thread::running')
             status_enum.waiting = gdb.parse_and_eval('sched::thread::waiting')

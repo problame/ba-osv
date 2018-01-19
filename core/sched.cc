@@ -252,7 +252,7 @@ void cpu::reschedule_from_interrupt()
     const auto p_status = p->_detached_state->st.load();
     assert(p_status != thread::status::queued);
 
-    if (p_status != thread::status::stagemig) { // see stage::dequeue() assertion
+    if (p_status != thread::status::stagemig_run) { // see stage::dequeue() assertion
         stage::dequeue();
     }
 
@@ -399,13 +399,16 @@ void cpu::handle_incoming_wakeups()
                 auto& t = q.front();
                 q.pop_front();
                 if (&t == thread::current()) {
+                    assert(t._detached_state->st.load() == thread::status::waking_run);
                     // Special case of current thread being woken before
                     // having a chance to be scheduled out.
                     t._detached_state->st.store(thread::status::running);
+                    // TODO resume_timers?
                 } else if (t.tcpu() != this) {
                     // Thread was woken on the wrong cpu. Can be a side-effect
                     // of sched::thread::pin(thread*, cpu*). Do nothing.
                 } else {
+                    assert(t._detached_state->st.load() == thread::status::waking_sto);
                     t._detached_state->st.store(thread::status::queued);
                     enqueue(t);
                     t.resume_timers();
@@ -483,9 +486,9 @@ void stage::enqueue()
         return;
     }
 
-    t->_detached_state->st.store(thread::status::stagemig);
+    t->_detached_state->st.store(thread::status::stagemig_run);
 
-    /* status::stagemig prohibits target_cpu from executing current thread
+    /* status::stagemig_run prohibits target_cpu from executing current thread
        which is critical because we are still executing it right now on this cpu */
 
     /* thread migration code adopted + extended from thread::pin */
@@ -512,7 +515,7 @@ void stage::enqueue()
 void stage::dequeue()
 {
     /* cannot dequeue during stage migration because current_cpu has already been changed in stage::enqueue */
-    assert(thread::current()->_detached_state->st.load() != thread::status::stagemig);
+    assert(thread::current()->_detached_state->st.load() != thread::status::stagemig_run);
 
     /* prohibit migration of this thread off this cpu while dequeuing */
     irq_save_lock_type irq_lock;
@@ -526,7 +529,7 @@ void stage::dequeue()
     thread *t;
     while ((t = inq->pop()) != nullptr) {
         auto state = t->_detached_state->st.load();
-        if (state == thread::status::stagemig_comp) {
+        if (state == thread::status::stagemig_sto) {
             t->_detached_state->st.store(thread::status::queued);
             trace_sched_stage_dequeue(cpu::current()->id, t);
             cpu::current()->enqueue(*t);
@@ -536,10 +539,10 @@ void stage::dequeue()
              * t's source CPU has not completed the context switch yet.
              * The source_cpu is likely somewhere between stagesched_incoming.push() and
              * thread::switch_to's */
-            assert(state == thread::status::stagemig);
+            assert(state == thread::status::stagemig_run);
             trace_sched_stage_dequeue_stagemig(cpu::current()->id, t);
             inq->push(t);
-            /* When we pop t the next time, it will probably be status::stagemig_comp
+            /* When we pop t the next time, it will probably be status::stagemig_sto
              * so busy waiting is bounded here. */
         }
     }
@@ -581,7 +584,7 @@ void thread::pin(cpu *target_cpu)
         t._detached_state->_cpu = target_cpu;
         percpu_base = target_cpu->percpu_base;
         current_cpu = target_cpu;
-        t._detached_state->st.store(thread::status::waiting);
+        t._detached_state->st.store(thread::status::waiting_run);
         // Note that wakeme is on the same CPU, and irq is disabled,
         // so it will not actually run until we stop running.
         wakeme->wake_with([&] { do_wakeme = true; });
@@ -985,17 +988,17 @@ void thread::start()
     _detached_state->_cpu = _attr._pinned_cpu ? _attr._pinned_cpu : current()->tcpu();
     remote_thread_local_var(percpu_base) = _detached_state->_cpu->percpu_base;
     remote_thread_local_var(current_cpu) = _detached_state->_cpu;
-    _detached_state->st.store(status::waiting);
+    _detached_state->st.store(status::waiting_sto);
     wake();
 }
 
 void thread::prepare_wait()
 {
-    // After setting the thread's status to "waiting", we must not preempt it,
+    // After setting the thread's status to "waiting_run", we must not preempt it,
     // as it is no longer in "running" state and therefore will not return.
     preempt_disable();
     assert(_detached_state->st.load() == status::running);
-    _detached_state->st.store(status::waiting);
+    _detached_state->st.store(status::waiting_run);
 }
 
 // This function is responsible for changing a thread's state from
@@ -1035,21 +1038,58 @@ void thread::destroy()
 
 // Must be called under rcu_read_lock
 //
-// allowed_initial_states_mask *must* contain status::waiting, and
-// *may* contain status::sending_lock (for waitqueue wait morphing).
-// it will transition from one of the allowed initial states to the
-// waking state.
+// allowed_initial_states_mask
+//  *must* contain status::waiting_*
+//  *may* contain status::sending_lock* (for waitqueue wait morphing)
+// It will transition from one of the allowed initial states to the waking state.
 void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 {
-    status old_status = status::waiting;
+    /* Codify the docs above */
+    constexpr unsigned possible_states_mask = (1 << unsigned(status::waiting_run))
+                                              | (1 << unsigned(status::waiting_sto))
+                                              | (1 << unsigned(status::sending_lock_run))
+                                              | (1 << unsigned(status::sending_lock_sto));
+    assert(allowed_initial_states_mask & (1 << unsigned(status::waiting_run)));
+    assert(allowed_initial_states_mask & (1 << unsigned(status::waiting_sto)));
+    assert(!(allowed_initial_states_mask & ~possible_states_mask));
+
     trace_sched_wake(st->t);
-    while (!st->st.compare_exchange_weak(old_status, status::waking)) {
-        if (!((1 << unsigned(old_status)) & allowed_initial_states_mask)) {
-            return;
-        }
+
+    /* Try to catch st->t while it is still going to sleep (not in status::waiting_sto yet)
+       LOGICAL ASSERTION: allowed initial states always transition directly to status::waking_run,
+                          not to one another */
+    status s;
+
+    s = status::waiting_run;
+    if ((1 << unsigned(s) & allowed_initial_states_mask) &&
+            st->st.compare_exchange_strong(s, status::waking_run)) {
+        goto wakeup;
     }
-    auto tcpu = st->_cpu;
+    barrier(); // TODO necessary? Idea: need ordered check on states because it's their temporal ordering
+    s = status::waiting_sto;
+    if ((1 << unsigned(s) & allowed_initial_states_mask) &&
+            st->st.compare_exchange_strong(s, status::waking_sto)) {
+        goto wakeup;
+    }
+    barrier();
+    s = status::sending_lock_run;
+    if ((1 << unsigned(s) & allowed_initial_states_mask) &&
+            st->st.compare_exchange_strong(s, status::waking_run)) {
+        goto wakeup;
+    }
+    barrier();
+    s = status::sending_lock_sto;
+    if ((1 << unsigned(s) & allowed_initial_states_mask) &&
+            st->st.compare_exchange_strong(s, status::waking_sto)) {
+        goto wakeup;
+    }
+
+    /* st->t was either status::waking_sto or it was already woken up by another CPU */
+    return;
+wakeup:
+    /* we are responsible for migrating st-> to its target CPU */
     WITH_LOCK(preempt_lock_in_rcu) {
+        auto tcpu = st->_cpu;
         unsigned c = cpu::current()->id;
         // we can now use st->t here, since the thread cannot terminate while
         // it's waking, but not afterwards, when it may be running
@@ -1083,23 +1123,46 @@ void thread::wake_lock(mutex* mtx, wait_record* wr)
         auto st = _detached_state.get();
         // We want to send_lock() to this thread, but we want to be sure we're the only
         // ones doing it, and that it doesn't wake up while we do
-        auto expected = status::waiting;
-        if (!st->st.compare_exchange_strong(expected, status::sending_lock, std::memory_order_relaxed)) {
-            // make sure the thread can see wr->woken() == true.  We're still protected by
-            // the mutex, so so need for extra protection
-            wr->clear();
-            // let the thread acquire the lock itself
-            return;
+        auto expected = status::waiting_run;
+        auto from_pre = false;
+        if (st->st.compare_exchange_strong(expected, status::sending_lock_run)) {
+            from_pre = true;
+            goto cont;
         }
+        barrier();
+        expected = status::waiting_sto;
+        if (st->st.compare_exchange_strong(expected, status::sending_lock_sto)) {
+            goto cont;
+        }
+        // make sure the thread can see wr->woken() == true.  We're still protected by
+        // the mutex, so so need for extra protection
+        wr->clear();
+        // let the thread acquire the lock itself
+        return;
+
+cont:
+
         // Send the lock to the thread, unless someone else already woke the us up,
         // and we're sleeping in mutex::lock().
         if (mtx->send_lock_unless_already_waiting(wr)) {
             st->lock_sent = true;
         } else {
-            st->st.store(status::waiting, std::memory_order_relaxed);
+            // revert to previous state
+            status expected;
+            if (from_pre) {
+                expected = status::sending_lock_run;
+                if (st->st.compare_exchange_strong(expected, status::waiting_run))
+                    goto clear;
+            }
+            barrier();
+            // must have scheduled out in the meantime
+            assert(st->st.load() == status::sending_lock_sto);
+            expected = status::sending_lock_sto;
+            st->st.compare_exchange_strong(expected, status::waiting_sto); // load should suffice?
+clear:
             wr->clear();
         }
-        // since we're in status::sending_lock, no one can wake us except mutex::unlock
+        // since we're in status::sending_lock_run, no one can wake us except mutex::unlock
     }
 }
 
@@ -1107,7 +1170,7 @@ bool thread::unsafe_stop()
 {
     WITH_LOCK(rcu_read_lock) {
         auto st = _detached_state.get();
-        auto expected = status::waiting;
+        auto expected = status::waiting_sto;
         return st->st.compare_exchange_strong(expected,
                 status::terminated, std::memory_order_relaxed)
                 || expected == status::terminated;
@@ -1129,23 +1192,68 @@ void thread::wait()
 
 void thread::stop_wait()
 {
-    // Can only re-enable preemption of this thread after it is no longer
-    // in "waiting" state (otherwise if preempted, it will not be scheduled
+    // General Note:
+    //
+    // We can only re-enable preemption of this thread after it is no longer
+    // in "waiting_*" state (otherwise if preempted, it will not be scheduled
     // in again - this is why we disabled preemption in prepare_wait.
-    status old_status = status::waiting;
+    //
+    // A post-condition of this function must thus be that we are status::running
+
+    // Check if we are just going to sleep and a predicate became true before we scheduled out
     auto& st = _detached_state->st;
+    status old_status = status::waiting_run;
     if (st.compare_exchange_strong(old_status, status::running)) {
         preempt_enable();
         return;
     }
+
+    // An asynchronous event must have occurred and changed our st->st to a state of their own.
+    // Now we wait until it completes whatever it is doing and makes us run again.
+
     preempt_enable();
+
+    // Were we terminated?
     if (old_status == status::terminated) {
         // We raced with thread::unsafe_stop() and lost
         cpu::schedule();
+        assert(false); // will not return from here
     }
-    while (st.load() == status::waking || st.load() == status::sending_lock) {
-        cpu::schedule();
+
+    while (true) {
+        auto status = st.load();
+        switch (status) {
+            /* We ruled that out at the beginning of the function */
+            case status::waiting_run:       while(true); // for debugging...
+
+            /* Rule out all the states we can't be in while we execute stop_wait() */
+            case status::waiting_sto:       assert(false);
+            case status::waking_sto:        assert(false);
+            case status::sending_lock_sto:  assert(false);
+            case status::stagemig_sto:      assert(false);
+            case status::terminating:       assert(false);
+            case status::terminated:        assert(false);
+            case status::queued:            assert(false);
+            case status::unstarted:         assert(false);
+            case status::prestarted:        assert(false);
+            case status::invalid:           assert(false);
+                while(true); // for debugging...
+
+            /* Wait for the async event to complete what it is doing. */
+            case status::sending_lock_run:
+            case status::stagemig_run:
+            // waking_run is completed by cpu::schedule and subsequent
+            // cpu::handle_incoming_wakeups without ever going to sleep
+            case status::waking_run:
+                cpu::schedule();
+                break;
+
+            /* Only leave when we are running */
+            case status::running:
+                goto out;
+        }
     }
+out:
     assert(st.load() == status::running);
 }
 

@@ -13,6 +13,8 @@ cscope.in.out
 cscope.out
 cscope.po.out
 
+thread_state.dot
+
 *.pyc
 *.swp
 *.patch
