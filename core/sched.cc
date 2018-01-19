@@ -272,21 +272,6 @@ void cpu::reschedule_from_interrupt()
         trace_sched_preempt();
         p->stat_preemptions.incr();
         enqueue(*p);
-    } else if(p_status != thread::status::stagemig) {
-        /* TODO work-conservation for blocking threads
-         *
-         * p is not runnable and not in flight for stage migration
-         *
-         * once it unblocks, it will be woken up on its detached_state cpu (this one)
-         * via the wake_impl + handle_incoming_wakeups duo
-         *
-         * however, the stage scheduler should dispatch this unblocked thread
-         * to ensure work-conservation
-         *
-         * When implementing this feature
-         *  - try to de-duplicate the code for status::running above
-         *  - take a look at how timers are implemented
-         **/
     }
 
     /* Find a new thread from CPU-local runqueue
