@@ -43,9 +43,10 @@ void (*resolve_set_fsbase(void))(u64 v)
 
 void set_fsbase(u64 v) __attribute__((ifunc("resolve_set_fsbase")));
 
-void thread::switch_to(bool complete_stage_migration)
+void thread::switch_to()
 {
     thread* old = current();
+
     // writing to fs_base invalidates memory accesses, so surround with
     // barriers
     barrier();
@@ -58,21 +59,39 @@ void thread::switch_to(bool complete_stage_migration)
     auto fpucw = processor::fnstcw();
     auto mxcsr = processor::stmxcsr();
 
-    /* When completing stage migration, the old thread must have status::stagemig.
-       When not completing stage migration, we shouldn't do anything. */
-    static_assert(sizeof(old->_detached_state->st) == 4,
-            "switch_to performs the equivalent of "
-            "a.compare_exchange_strong(cmp_old_status, status::running) "
-            "but without touching the stack");
-    static_assert(sizeof(status::stagemig_comp) == 4);
-    asm volatile
+    // Make sure std::atomic<status> takes no additional spaceand
+    // can be modified via inline assembly
+    static_assert(sizeof(old->_detached_state->st) == 4);
+    static_assert(sizeof(status) == 4);
+    // Make sure st is naturally aligned so mov is atomic
+    assert((uintptr_t)&_detached_state->st % 4 == 0);
+
+retry_st_transition:
+    // +10ns
+    // assert(st_pre != status::invalid);
+    // assert(st_post != status::invalid);
+    auto st_pre = old->_detached_state->st.load();
+    auto st_post = switch_to_status_transition(st_pre);
+    asm volatile goto
         (
          "mov %%rbp, %c[rbp](%[ost]) \n\t"
          "movq $1f, %c[rip](%[ost]) \n\t"
          "mov %%rsp, %c[rsp](%[ost]) \n\t"
-         "cmp $0, %%rax\n\t"
-         "je switch \n\t"
-         "lock xchg %%edx, (%%rsi)\n\t" // use 32bit regs because sizeof(_detached_state->st) == 4
+
+         /* Try to complete the state transition computed above.
+          * The cmpxchg might not succeed because an asynchronous
+          * event on another CPU can legitimately race with this code.
+          * However, the transition matrix dictates that the asynchronous
+          * event must honor that we are still running and switch us to an
+          * appropriate state.
+          * Thus, we try a new state transition with the new state in case
+          * cmpxchg fails.
+          **/
+         "cmp %[st_pre], %[st_post]\n\t"
+         "je switch \n\t" // nothing to do
+         "lock cmpxchg %[st_post], (%[st_ptr])\n\t"
+         "jnz %l[retry_st_transition]\n\t"
+
          "switch: \n\t"
          "mov %c[rsp](%[nst]), %%rsp \n\t"
          "mov %c[rbp](%[nst]), %%rbp \n\t"
@@ -80,19 +99,21 @@ void thread::switch_to(bool complete_stage_migration)
          "1: \n\t"
          // NOTE: register allocation is done manually using constraints (had errors on gcc 7.2.1)
          :
-         : "S"(&old->_detached_state->st), // rsi/esi
+         : [st_pre]"a"(st_pre), // rax/eax, hard requirement of cmpxchg
+           [st_ptr]"S"(&old->_detached_state->st), // rsi/esi
            [ost]"b"(&old->_state), // rbx/ebx
            [nst]"c"(&this->_state), // rcx/ecx
            [rsp]"i"(offsetof(thread_state, rsp)),
            [rbp]"i"(offsetof(thread_state, rbp)),
            [rip]"i"(offsetof(thread_state, rip)),
-           "a"(complete_stage_migration ? 1 : 0),
-           "d"(status::stagemig_comp) //rdx/edx
+           [invalid]"i"(status::invalid),
+           [st_post]"d"(st_post) //rdx/edx
          : // used above: rax, rbx, rcx, rdx, rsi
            "rdi", "r8", "r9",
            "r10", "r11", "r12", "r13", "r14", "r15",
            "memory", // we switch the stack
            "cc" // cmpxchg clobbers flags register
+         : retry_st_transition
                );
     processor::fldcw(fpucw);
     processor::ldmxcsr(mxcsr);

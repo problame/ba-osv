@@ -231,15 +231,12 @@ void cpu::schedule()
     }
 }
 
-void cpu::reschedule_from_interrupt(bool complete_stage_migration)
+void cpu::reschedule_from_interrupt()
 {
     trace_sched_sched();
     assert(sched::exception_depth <= 1);
     need_reschedule = false;
     handle_incoming_wakeups();
-    if (!complete_stage_migration) {
-        stage::dequeue();
-    }
 
     auto now = osv::clock::uptime::now();
     auto interval = now - running_since;
@@ -254,7 +251,10 @@ void cpu::reschedule_from_interrupt(bool complete_stage_migration)
 
     const auto p_status = p->_detached_state->st.load();
     assert(p_status != thread::status::queued);
-    assert(!complete_stage_migration || p_status == thread::status::stagemig);
+
+    if (p_status != thread::status::stagemig) { // see stage::dequeue() assertion
+        stage::dequeue();
+    }
 
     p->_total_cpu_time += interval;
 
@@ -322,7 +322,8 @@ dequeue:
     if (lazy_flush_tlb.exchange(false, std::memory_order_seq_cst)) {
         mmu::flush_tlb_local();
     }
-    n->switch_to(complete_stage_migration);
+
+    n->switch_to();
 
     // Note: after the call to n->switch_to(), we should no longer use any of
     // the local variables, nor "this" object, because we just switched to n's
@@ -517,7 +518,7 @@ void stage::enqueue()
      * runnable once source_cpu doesn't execute it anymore so that target_cpu
      * stops re-enqueuing it to its stagesched_incoming
      */
-    source_cpu->reschedule_from_interrupt(true); // releases guard
+    source_cpu->reschedule_from_interrupt(); // releases guard
 
     /* from here on, the calling thread is in target_cpu->stagesched_incoming
        or already in target_cpu->runqueue */
@@ -525,6 +526,8 @@ void stage::enqueue()
 
 void stage::dequeue()
 {
+    /* cannot dequeue during stage migration because current_cpu has already been changed in stage::enqueue */
+    assert(thread::current()->_detached_state->st.load() != thread::status::stagemig);
 
     /* prohibit migration of this thread off this cpu while dequeuing */
     irq_save_lock_type irq_lock;

@@ -523,7 +523,7 @@ private:
             unsigned allowed_initial_states_mask = 1 << unsigned(status::waiting));
     static void sleep_impl(timer &tmr);
     void main();
-    void switch_to(bool complete_stage_migration = false);
+    void switch_to();
     void switch_to_first();
     void prepare_wait();
     void wait();
@@ -600,6 +600,13 @@ private:
     // part of the thread state is detached from the thread structure,
     // and freed by rcu, so that waking a thread and destroying it can
     // occur in parallel without synchronization via thread_handle
+
+    // Returns
+    // - status::invalid if from is not a valid state to have in switch_to
+    // - otherwise, the new _detached_state->st that should be set by
+    //   thread::switch_to right after it scheduled the calling thread out
+    static inline status switch_to_status_transition(status from);
+
     struct detached_state {
         explicit detached_state(thread* t) : t(t) {}
         thread* t;
@@ -795,7 +802,7 @@ struct cpu : private timer_base::client {
      *       by setting _detached_state.st of the calling thread to status::stagemig_comp
      *       _after_ performing the thread switch.
      */
-    void reschedule_from_interrupt(bool complete_stage_migration = false);
+    void reschedule_from_interrupt();
     void enqueue(thread& t);
     void init_idle_thread();
     virtual void timer_fired() override;
@@ -1194,6 +1201,31 @@ void thread::wake_with_from_mutex(Action action)
 {
     return do_wake_with(action, (1 << unsigned(status::waiting))
                               | (1 << unsigned(status::sending_lock)));
+}
+
+inline
+thread::status thread::switch_to_status_transition(status from)
+{
+    switch (from) {
+
+        // Don't change anything in these states
+        case status::prestarted:
+        case status::queued:
+        case status::terminating:
+        case status::waiting:
+        case status::sending_lock:
+        case status::waking:
+            return from;
+
+        // Handle stage migration from calling thread
+        case status::stagemig:
+            return status::stagemig_comp;
+
+        // Invalid cases
+        default:
+            return status::invalid;
+    }
+    return status::invalid;
 }
 
 extern cpu __thread* current_cpu;
