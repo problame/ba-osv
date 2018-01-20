@@ -994,12 +994,11 @@ class osv_info_threads(gdb.Command):
                 else:
                     location = '??'
 
-                gdb.write('%4d (0x%x) %-15s cpu%s %-10s %s vruntime %12g\n' %
+                gdb.write('%4d (0x%x) %-15s cpu%s %-10s %s\n' %
                           (tid, ulong(t.address), name,
                            cpu['arch']['acpi_id'] if cpu != 0 else "?",
                            thread_status(t),
                            location,
-                           t['_runtime']['_Rtt'],
                            )
                           )
 
@@ -1504,7 +1503,7 @@ class osv_runqueue(gdb.Command):
         for cpu in range(ncpus):
             gdb.write("CPU %d:\n" % cpu)
             for thread in runqueue(cpu):
-                print('%d 0x%x %g' % (thread['_id'], ulong(thread), thread['_runtime']['_Rtt']))
+                print('%d 0x%x' % (thread['_id'], ulong(thread)))
 
 class osv_info_virtio(gdb.Command):
     def __init__(self):
