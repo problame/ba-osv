@@ -542,6 +542,8 @@ void stage::enqueue()
     auto st_cmpxchg_success = st.compare_exchange_strong(st_before, thread::status::stagemig_run);
     assert(st_cmpxchg_success);
 
+    t->_detached_state->_stage = this;
+
     if (target_cpu->id == source_cpu->id) {
         st.store(thread::status::running);
         source_cpu->reschedule_from_interrupt(); // releases guard
@@ -1128,28 +1130,32 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
        LOGICAL ASSERTION: allowed initial states always transition directly to status::waking_run,
                           not to one another */
     status s;
-
+    bool stopped;
     s = status::waiting_run;
     if ((1 << unsigned(s) & allowed_initial_states_mask) &&
             st->st.compare_exchange_strong(s, status::waking_run)) {
+        stopped = false;
         goto wakeup;
     }
     barrier(); // TODO necessary? Idea: need ordered check on states because it's their temporal ordering
     s = status::waiting_sto;
     if ((1 << unsigned(s) & allowed_initial_states_mask) &&
             st->st.compare_exchange_strong(s, status::waking_sto)) {
+        stopped = true;
         goto wakeup;
     }
     barrier();
     s = status::sending_lock_run;
     if ((1 << unsigned(s) & allowed_initial_states_mask) &&
             st->st.compare_exchange_strong(s, status::waking_run)) {
+        stopped = false;
         goto wakeup;
     }
     barrier();
     s = status::sending_lock_sto;
     if ((1 << unsigned(s) & allowed_initial_states_mask) &&
             st->st.compare_exchange_strong(s, status::waking_sto)) {
+        stopped = true;
         goto wakeup;
     }
 
@@ -1158,10 +1164,30 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 wakeup:
     /* we are responsible for migrating st-> to its target CPU */
     WITH_LOCK(preempt_lock_in_rcu) {
-        auto tcpu = st->_cpu;
-        unsigned c = cpu::current()->id;
         // we can now use st->t here, since the thread cannot terminate while
         // it's waking, but not afterwards, when it may be running
+
+        cpu *tcpu = st->_cpu;
+        if (stopped && st->_stage && st->t->migratable()) {
+            assert(st->t != thread::current());
+            assert(st->t->_runqueue_link.is_linked() == false);
+            tcpu = st->_stage->enqueue_policy();
+            if (tcpu != st->_cpu) {
+                irq_save_lock_type irq_lock;
+                WITH_LOCK(irq_lock) {
+                    // This is remote thread migration, i.e. we are CPU A
+                    // and migrate previously waiting st->t on CPU B to CPU C
+                    trace_sched_migrate(st->t, tcpu->id);
+                    st->t->stat_migrations.incr();
+                    st->t->suspend_timers();
+                    st->_cpu = tcpu;
+                    st->t->remote_thread_local_var(::percpu_base) = tcpu->percpu_base;
+                    st->t->remote_thread_local_var(current_cpu) = tcpu;
+                }
+            }
+        }
+
+        unsigned c = cpu::current()->id;
         irq_save_lock_type irq_lock;
         WITH_LOCK(irq_lock) {
             tcpu->incoming_wakeups[c].push_back(*st->t);

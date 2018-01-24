@@ -685,6 +685,7 @@ private:
         explicit detached_state(thread* t) : t(t) {}
         thread* t;
         cpu* _cpu;
+        stage* _stage = nullptr;
         bool lock_sent = false;   // send_lock() was called for us
         std::atomic<status> st = { status::unstarted };
     };
