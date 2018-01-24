@@ -1365,21 +1365,41 @@ void thread::exit()
     t->complete();
 }
 
-void timer_base::client::suspend_timers()
+void thread::suspend_timers()
 {
+    std::lock_guard<rspinlock> lg_t(_timer_client_lock);
     if (_timers_need_reload) {
         return;
     }
     _timers_need_reload = true;
+
+    cpu *c = _detached_state->_cpu;
+    assert(c);
+    assert(cpu::current() == c || _detached_state->st.load() == status::waking_sto);
+    std::lock_guard<rspinlock> lg_c(c->_timer_client_lock);
+    c->timers.suspend(_active_timers);
+}
+
+// call with IRQs disabled
+void timer_base::client::suspend_timers()
+{
+    std::lock_guard<rspinlock> lg_x(_timer_client_lock);
+    if (_timers_need_reload) {
+        return;
+    }
+    _timers_need_reload = true;
+    std::lock_guard<rspinlock> lg_c(cpu::current()->_timer_client_lock);
     cpu::current()->timers.suspend(_active_timers);
 }
 
 void timer_base::client::resume_timers(cpu *oncpu)
 {
+    std::lock_guard<rspinlock> lg(_timer_client_lock);
     if (!_timers_need_reload) {
         return;
     }
     _timers_need_reload = false;
+    std::lock_guard<rspinlock> lg_c(oncpu->_timer_client_lock);
     oncpu->timers.resume(_active_timers);
 }
 
@@ -1533,6 +1553,7 @@ void timer_list::resume(timer_base::client_list_t& timers)
 
 void timer_list::callback_dispatch::fired()
 {
+    std::lock_guard<rspinlock> lg(cpu::current()->_timer_client_lock);
     cpu::current()->timers.fired();
 }
 
@@ -1552,6 +1573,7 @@ void timer_base::expire()
 {
     trace_timer_fired(this);
     _state = state::expired;
+    std::lock_guard<rspinlock> lg(_t._timer_client_lock);
     _t._active_timers.erase(_t._active_timers.iterator_to(*this));
     _t.timer_fired();
 }
@@ -1564,6 +1586,8 @@ void timer_base::set(osv::clock::uptime::time_point time)
         _state = state::armed;
         _time = time;
 
+        std::lock_guard<rspinlock> lg_t(_t._timer_client_lock);
+        std::lock_guard<rspinlock> lg_c(cpu::current()->_timer_client_lock);
         auto& timers = cpu::current()->timers;
         _t._active_timers.push_back(*this);
         if (timers._list.insert(*this)) {
@@ -1581,7 +1605,9 @@ void timer_base::cancel()
     irq_save_lock_type irq_lock;
     WITH_LOCK(irq_lock) {
         if (_state == state::armed) {
+            std::lock_guard<rspinlock> lg_t(_t._timer_client_lock);
             _t._active_timers.erase(_t._active_timers.iterator_to(*this));
+            std::lock_guard<rspinlock> lg_c(cpu::current()->_timer_client_lock);
             cpu::current()->timers._list.remove(*this);
         }
         _state = state::free;
@@ -1594,13 +1620,17 @@ void timer_base::reset(osv::clock::uptime::time_point time)
 {
     trace_timer_reset(this, time.time_since_epoch().count());
 
-    auto& timers = cpu::current()->timers;
 
     irq_save_lock_type irq_lock;
     WITH_LOCK(irq_lock) {
+
+        std::lock_guard<rspinlock> lg_c(cpu::current()->_timer_client_lock);
+        auto& timers = cpu::current()->timers;
+
         if (_state == state::armed) {
             timers._list.remove(*this);
         } else {
+            std::lock_guard<rspinlock> lg_t(_t._timer_client_lock);
             _t._active_timers.push_back(*this);
             _state = state::armed;
         }

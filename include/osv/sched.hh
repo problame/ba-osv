@@ -215,13 +215,21 @@ public:
     public:
         virtual ~client() {}
         virtual void timer_fired() = 0;
-        void suspend_timers();
+        /** Suspend the timers of the client on its current CPU.
+         * Must be called from the CPU where client is executing.
+         * Callers must have IRQs disabled.
+         * Note that class thread overrides this function.
+         **/
+        virtual void suspend_timers();
         // Resume timers on 'oncpu'. Callers must assert they are executing on 'oncpu'.
         void resume_timers(cpu *oncpu);
     private:
+        rspinlock _timer_client_lock;
         bool _timers_need_reload = false;
         client_list_t _active_timers;
         friend class timer_base;
+        friend class thread;
+        friend class timer_list;
     };
 public:
     explicit timer_base(client& t);
@@ -314,6 +322,7 @@ constexpr thread_runtime::duration context_switch_penalty =
  * OSv thread
  */
 class thread : private timer_base::client {
+    friend class timer_base;
 private:
     struct detached_state;
 public:
@@ -611,6 +620,8 @@ public:
     }
 private:
     virtual void timer_fired() override;
+    // Like timer_base::client's impl, but allows suspending timers from a remote CPU.
+    virtual void suspend_timers() override;
     struct detached_state;
     friend struct detached_state;
 private:
@@ -827,6 +838,9 @@ struct cpu : private timer_base::client {
     thread* bringup_thread;
     runqueue_type runqueue;
     timer_list timers;
+    friend class timer_base;
+    friend class thread;
+    friend class timer_list;
     thread* idle_thread;
     // if true, cpu is now polling incoming_wakeups_mask
     std::atomic<bool> idle_poll = { false };

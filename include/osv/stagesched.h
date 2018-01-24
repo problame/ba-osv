@@ -54,6 +54,7 @@ namespace sched {
             void operator=(stage const&) {}
 
             cpu *enqueue_policy();
+            friend class thread;
 
         public:
             static const int max_stages = 32;
