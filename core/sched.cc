@@ -397,19 +397,31 @@ void cpu::handle_incoming_wakeups()
             auto& q = incoming_wakeups[i];
             while (!q.empty()) {
                 auto& t = q.front();
+                auto& st = t._detached_state->st;
                 q.pop_front();
+                assert(t.tcpu() == this);
                 if (&t == thread::current()) {
-                    assert(t._detached_state->st.load() == thread::status::waking_run);
                     // Special case of current thread being woken before
                     // having a chance to be scheduled out.
-                    t._detached_state->st.store(thread::status::running);
-                    // TODO resume_timers?
-                } else if (t.tcpu() != this) {
-                    // Thread was woken on the wrong cpu. Can be a side-effect
-                    // of sched::thread::pin(thread*, cpu*). Do nothing.
-                } else {
-                    assert(t._detached_state->st.load() == thread::status::waking_sto);
-                    t._detached_state->st.store(thread::status::queued);
+                    // No need to resume timers because migration only happens
+                    // if thread was not running.
+                    auto st_before = thread::status::waking_run;
+                    auto cmpxchg_res = st.compare_exchange_strong(st_before, thread::status::running);
+                    assert(cmpxchg_res);
+                } else  {
+                    while (true) {
+                        // TODO spin, not sure if we are allowed to write to incoming_wakups
+                        //
+                        // FIXME spinning here delays dequeuing from all other incoming_wakups queues
+                        // FIXME since we dequeued t, we could have a queue local to this function
+                        // FIXME that accumulates all still-running threads and checks on them after
+                        // FIXME handling all the other ones
+                        // FIXME use the boost::intrusive links for that
+                        auto st_before = thread::status::waking_sto;
+                        if (st.compare_exchange_strong(st_before,thread::status::queued))
+                            break;
+                        assert(st_before == thread::status::waking_run);
+                    }
                     enqueue(t);
                     t.resume_timers();
                 }
@@ -479,14 +491,16 @@ void stage::enqueue()
     // must be called from a thread executing on a CPU
     assert(t->_runqueue_link.is_linked() == false);
     //must be called from a runnable thread
-    assert(t->_detached_state->st.load() == thread::status::running);
+    auto& st = t->_detached_state->st;
+    auto st_before = thread::status::running;
+    auto st_cmpxchg_success = st.compare_exchange_strong(st_before, thread::status::stagemig_run);
+    assert(st_cmpxchg_success);
 
     if (target_cpu->id == source_cpu->id) {
+        st.store(thread::status::running);
         source_cpu->reschedule_from_interrupt(); // releases guard
         return;
     }
-
-    t->_detached_state->st.store(thread::status::stagemig_run);
 
     /* status::stagemig_run prohibits target_cpu from executing current thread
        which is critical because we are still executing it right now on this cpu */
@@ -526,25 +540,34 @@ void stage::dequeue()
     /* fully drain inq
      * FIXME the runtime of the loop is unbounded.
      *       can only fix this once do_idle uses mwait */
+
+    // FIXME (1) the runtime of this loop is unbounded
+    //
+    // FIXME (2) busy-waiting costs time which could be used to perform the
+    // FIXME     remaining dequeues
+    // FIXME since we dequeued t, we could have a queue local to this function
+    // FIXME that accumulates all still-running threads and checks on them after
+    // FIXME handling all the other ones
+    // FIXME use the boost::intrusive links for that
     thread *t;
     while ((t = inq->pop()) != nullptr) {
-        auto state = t->_detached_state->st.load();
-        if (state == thread::status::stagemig_sto) {
-            t->_detached_state->st.store(thread::status::queued);
-            trace_sched_stage_dequeue(cpu::current()->id, t);
-            cpu::current()->enqueue(*t);
-            t->resume_timers();
-        } else {
+        auto& st = t->_detached_state->st;
+        while(true) {
             /* This situation is unlikely:
              * t's source CPU has not completed the context switch yet.
              * The source_cpu is likely somewhere between stagesched_incoming.push() and
              * thread::switch_to's */
-            assert(state == thread::status::stagemig_run);
+            auto st_before = thread::status::stagemig_sto;
+            if (st.compare_exchange_strong(st_before, thread::status::queued)) {
+                break;
+            }
             trace_sched_stage_dequeue_stagemig(cpu::current()->id, t);
-            inq->push(t);
-            /* When we pop t the next time, it will probably be status::stagemig_sto
-             * so busy waiting is bounded here. */
+            assert(st_before == thread::status::stagemig_run);
         }
+        assert(t->_detached_state->_cpu == cpu::current());
+        trace_sched_stage_dequeue(cpu::current()->id, t);
+        cpu::current()->enqueue(*t);
+        t->resume_timers();
     }
 
 }
