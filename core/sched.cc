@@ -466,7 +466,8 @@ void cpu::handle_incoming_wakeups()
                         assert(st_before == thread::status::waking_run);
                     }
                     enqueue(t);
-                    t.resume_timers();
+                    assert(t._detached_state->_cpu == this); // can't do that in resume_timers
+                    t.resume_timers(this);
                 }
             }
         }
@@ -612,7 +613,7 @@ void stage::dequeue()
         assert(t->_detached_state->_cpu == cpu::current());
         trace_sched_stage_dequeue(cpu::current()->id, t);
         cpu::current()->enqueue(*t);
-        t->resume_timers();
+        t->resume_timers(cpu::current());
     }
 
 }
@@ -1373,13 +1374,13 @@ void timer_base::client::suspend_timers()
     cpu::current()->timers.suspend(_active_timers);
 }
 
-void timer_base::client::resume_timers()
+void timer_base::client::resume_timers(cpu *oncpu)
 {
     if (!_timers_need_reload) {
         return;
     }
     _timers_need_reload = false;
-    cpu::current()->timers.resume(_active_timers);
+    oncpu->timers.resume(_active_timers);
 }
 
 void thread::join()

@@ -216,7 +216,8 @@ public:
         virtual ~client() {}
         virtual void timer_fired() = 0;
         void suspend_timers();
-        void resume_timers();
+        // Resume timers on 'oncpu'. Callers must assert they are executing on 'oncpu'.
+        void resume_timers(cpu *oncpu);
     private:
         bool _timers_need_reload = false;
         client_list_t _active_timers;
