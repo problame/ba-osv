@@ -488,6 +488,8 @@ void stage::enqueue()
 
     trace_sched_stage_enqueue(this, source_cpu->id, target_cpu->id, t);
 
+    // must be called from migratable context)
+    assert(t->migratable());
     // must be called from a thread executing on a CPU
     assert(t->_runqueue_link.is_linked() == false);
     //must be called from a runnable thread
