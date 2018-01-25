@@ -141,6 +141,49 @@ private:
     std::unique_ptr<thread> _thread;
 };
 
+rspinlock::holder::holder(cpu *c, thread *t)
+{
+    static_assert(sizeof(c->id) == 4);
+    static_assert(sizeof(t->id()) == 4);
+    uint32_t cpuid = (uint32_t)c->id;
+    uint32_t tid = (uint32_t)t->id();
+    assert(cpuid != (uint32_t)-1);
+    assert(tid != (uint32_t)-1);
+    v = (uint64_t)cpuid << 32 | (uint64_t)tid;
+}
+
+rspinlock::holder rspinlock::holder::current()
+{
+    return holder(cpu::current(), thread::current());
+}
+
+void rspinlock::lock()
+{
+    sched::preempt_disable();
+    holder caller = holder::current();
+    if (_holder.load() == caller)
+        goto out;
+    while (true) {
+        holder before;
+        if (_holder.compare_exchange_strong(before, caller))
+            break;
+        while(_holder.load()) {
+            barrier();
+        }
+    }
+out:
+    lock_count++;
+}
+
+void rspinlock::unlock()
+{
+    assert(_holder.load() == holder::current());
+    if (--lock_count == 0) {
+        _holder.store(holder::empty());
+    }
+    sched::preempt_enable();
+}
+
 cpu::cpu(unsigned _id)
     : id(_id)
     , idle_thread()

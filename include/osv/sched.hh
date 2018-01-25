@@ -159,6 +159,51 @@ private:
     std::atomic<unsigned long> _mask;
 };
 
+/**
+ * Recursive Spinlock
+ *
+ * Identifies caller by cpu ID and thread ID
+ * and panics if either of these values are INT_MAX.
+ *
+ * The current implementation is only correct when used
+ * with DISABLED INTERRUPTS.
+ * This is not only due to the risk of deadlock, but because
+ * the current implementation cannot distinguish a thread T
+ * from an interrupt handler executing on top of T because
+ * they have the same cpu ID and thread ID.
+ *
+ * The fatal case is when a locker is interrupted after setting _holder from
+ * empty to itself but before incrementing lock_count from 0 to 1:
+ * the interrupt handler is indistinguishable from a recursive lock from T
+ * and thus will pass the cmpxchg and increment lock_count from 0 to 1,
+ * do its thing, unlock, set lock_count back to 0 and set _holder to empty
+ * although T still holds the lock.
+ * T will then crash in the assertion in unlock.
+ *
+ * => TODO: fix that by adding a way to get the current IRQ handler
+ *
+ **/
+class rspinlock {
+    class holder {
+        uint64_t v = (uint64_t)-1;
+        holder(uint64_t v) : v(v) {}
+        public:
+        holder() noexcept {}
+        holder(cpu *c, thread *t);
+        static holder current();
+        static inline holder empty() { return holder(); }
+        operator bool const() { return v != (uint64_t)-1; }
+        bool operator ==(const holder& h) { return h.v == v; }
+    };
+    std::atomic<holder> _holder;
+    int lock_count;
+    public:
+    rspinlock() : lock_count(0) {}
+    void lock();
+    void unlock();
+};
+
+
 class timer_base {
 public:
     bi::list_member_hook<> hook;
