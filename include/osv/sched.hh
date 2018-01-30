@@ -74,7 +74,13 @@ const unsigned max_cpus = sizeof(unsigned long) * 8;
 class cpu_set {
 public:
     explicit cpu_set() : _mask() {}
-    cpu_set(const cpu_set& other) : _mask(other._mask.load(std::memory_order_relaxed)) {}
+    cpu_set& operator=(const cpu_set &s) {
+        _mask = s._mask.load(std::memory_order_relaxed);
+        return *this;
+    }
+    cpu_set(const cpu_set& other) {
+        *this = other;
+    }
     void set(unsigned c) {
         _mask.fetch_or(1UL << c, std::memory_order_release);
     }

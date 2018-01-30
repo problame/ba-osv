@@ -10,6 +10,7 @@
 
 #include <string>
 #include <stack>
+#include <memory>
 
 #include <osv/mutex.h>
 
@@ -60,14 +61,17 @@ namespace sched {
 
         public:
             static const int max_stages = 32;
+            static int max_assignment_age;
         private: /* global state */
             static stage stages[max_stages];
             static mutex stages_mtx;
             static int stages_next;
-
+            static void update_assignment();
         private: /* per-instance state */
             int _id;
             std::string _name;
+            std::atomic<int> _c_in;
+
     };
 
     /**

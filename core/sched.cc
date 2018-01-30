@@ -26,6 +26,10 @@
 #include <osv/preempt-lock.hh>
 #include <osv/app.hh>
 #include <osv/symbols.hh>
+#include <atomic>
+#include <algorithm>
+#include <iterator>
+#include <osv/spinlock.h>
 
 MAKE_SYMBOL(sched::thread::current);
 MAKE_SYMBOL(sched::cpu::current);
@@ -66,6 +70,9 @@ TRACEPOINT(trace_thread_create, "thread=%p", thread*);
 TRACEPOINT(trace_sched_stage_enqueue, "stage=%p scpu=%d tcpu=%d thread=%p", stage*, unsigned, unsigned, thread*);
 TRACEPOINT(trace_sched_stage_dequeue, "dcpu=%d thread=%p", unsigned, thread*);
 TRACEPOINT(trace_sched_stage_dequeue_stagemig, "dcpu=%d thread=%p", unsigned, thread*);
+TRACEPOINT(trace_sched_stage_update_assignment, "cpu=%d ns=%d", unsigned, int);
+// TODO more elegant way to support sched::stage::max_stages
+TRACEPOINT(trace_sched_stage_update_assignment_stages_cin, "0=%d 1=%d 2=%d 3=%d 4=%d 5=%d 6=%d 7=%d", int, int, int, int, int, int, int, int);
 
 std::vector<cpu*> cpus __attribute__((init_priority((int)init_prio::cpus)));
 
@@ -493,6 +500,263 @@ unsigned cpu::load()
     return runqueue.size();
 }
 
+
+// The assignment of stages to CPUs based on #cores requirements.
+class assignment {
+public:
+    using requirements = std::array<int, stage::max_stages>;
+private:
+    requirements reqs;
+    // TODO do not use cpu_set, it uses atomic instructions where we don't need them
+    std::array<cpu_set, stage::max_stages> cpus_per_stage;
+    int cpus;
+    int stages;
+public:
+
+    // Used to construct the initial assignment.
+    // The given cpus and stages cannot be changed afterwards.
+    assignment(int cpus, int stages) : cpus(cpus), stages(stages) {
+        assert(stages <= cpus);
+        std::fill(reqs.begin(), reqs.begin() + stages, 0);
+        for (int si = 0; si < stages; si++) {
+            cpus_per_stage[si].fetch_clear();
+        }
+        for (int c = 0; c < cpus; c++) {
+            reqs[c%stages] += 1;
+            cpus_per_stage[c%stages].set(c);
+        }
+        validate_reqs(reqs);
+    }
+
+    inline cpu_set stage_cpus(int stageno) {
+        return cpus_per_stage[stageno];
+    }
+
+private:
+
+    // Assert that reqs requires exactly as many cores as we have available
+    inline void validate_reqs(const requirements& reqs) {
+        int core_sum = 0;
+        for (int si = 0; si < stages; si++) {
+            assert(reqs[si] >= 0);
+            core_sum += reqs[si];
+        }
+        assert(core_sum == cpus);
+    }
+
+public:
+
+    // Transition this assignment to an assignment that fulfills
+    // the given new_reqs requirements.
+    // As many CPUs as possible are left untouched.
+    inline void transition_to(const requirements& new_reqs) {
+
+        validate_reqs(new_reqs);
+
+        std::array<int, stage::max_stages> req_delta;
+        int delta_total = 0;
+        for (int si = 0; si < stages; si++) {
+            req_delta[si] = new_reqs[si] - reqs[si];
+            delta_total += req_delta[si];
+        }
+        assert(delta_total == 0); // otherwise, phase 1 did bad assignment or we can't use the algorithm below
+
+        // req_delta[i] > 0: stage i needs cpus
+        // req_delta[i] < 0: stage i gives cpus
+        for (int si = 0; si < stages; si++) {
+            if (req_delta[si] == 0) continue;
+            for (int isi = si; isi < stages; isi++) {
+                using namespace std;
+                auto txcpu_c = min(abs(req_delta[isi]),abs(req_delta[si]));
+                if (req_delta[isi] < 0 && req_delta[si] > 0) {
+                    req_delta[si] -= txcpu_c;
+                    req_delta[isi] += txcpu_c;
+                    transfer_cpus(isi, si, txcpu_c);
+                    assert(req_delta[isi] <= 0);
+                    assert(req_delta[si] >= 0);
+                } else if (req_delta[isi] > 0 && req_delta[si] < 0) {
+                    req_delta[si] += txcpu_c;
+                    req_delta[isi] -= txcpu_c;
+                    transfer_cpus(si, isi, txcpu_c);
+                    assert(req_delta[isi] >= 0);
+                    assert(req_delta[si] <= 0);
+                }
+            }
+            assert(req_delta[si] == 0);
+        }
+    }
+
+private:
+    inline void transfer_cpus(int from_stage, int to_stage, unsigned amount) {
+        // TODO clever bit counting operations on x86
+        auto& from_set = cpus_per_stage[from_stage];
+        auto& to_set = cpus_per_stage[to_stage];
+        for (auto f : from_set) {
+            if (amount == 0) break;
+            if (!to_set.test_and_set(f)) {
+                from_set.clear(f);
+            }
+            amount--;
+        }
+    }
+};
+
+// we don't want to spill the details of _assignment into
+// stagesched.h since it is an implementation detail and the
+// header is directly used by applications
+// FIXME: better encapsulation of policy code
+static osv::rcu_ptr<assignment> _assignment;
+int stage::max_assignment_age = 100;
+constexpr int assignment_age_unused = -1;
+static std::atomic<int> _assignment_age(assignment_age_unused);
+
+/**
+ * Compute stages' CPU-requirements and update the current
+ * CPU assignment, _assignment.
+ *
+ * Callers must assert that
+ * - update_assignment() runs exclusively (for RCU)
+ * - context is preemptible (memory allocation)
+ *
+ **/
+void stage::update_assignment()
+{
+
+    assert(preemptable()); // we use 'new'
+
+    auto& a = *_assignment.read_by_owner();
+    constexpr float eps = 0.003;
+
+    //
+    // PHASE 1: DISTRIBUTE CPUS AMONG STAGES
+    //
+    // Note: It is acceptable that a stage gets assigned no CPU
+    //
+
+    // Fetch all stages' _c_in and cache it locally
+    std::array<int, max_stages> stage_sizes;
+    int total_c_in = 0;
+    for (int si = 0; si < stages_next; si++) {
+        stage_sizes[si] = stages[si]._c_in;
+        total_c_in += stage_sizes[si];
+    }
+    static_assert(max_stages >= 8);
+    std::fill(stage_sizes.begin()+stages_next, stage_sizes.end(), 0);
+    trace_sched_stage_update_assignment_stages_cin(stage_sizes[0],
+        stage_sizes[1], stage_sizes[2], stage_sizes[3], stage_sizes[4],
+        stage_sizes[5], stage_sizes[6], stage_sizes[7]);
+
+    // Record CPU distribution in reqs (see assignment::validate_reqs)
+    // TODO: encapsulate requirements into opaque type
+    std::array<int, max_stages> reqs;
+    std::fill(reqs.begin(), reqs.begin() + stages_next, 0);
+
+    // Distribute CPUs using stage_priorities
+    std::array<float, max_stages> sp;
+    // First round of priorities is proportional to _c_in
+    float sp_total = 0.0;
+    for (int si = 0; si < stages_next; si++) {
+        sp[si] = (float)stage_sizes[si] / total_c_in;
+        sp_total += sp[si];
+    }
+    assert(sp_total <= 1.0 + eps);
+
+    int cpus_left = cpus.size();
+    while (cpus_left > 0) {
+
+        // Try to use sp as is or drive priorities toward a winner
+        std::array<float, max_stages> remainders;
+        int cpus_assigned;
+        float total_remainders;
+        int number_of_priority_redistrs = 0;
+        while (true) {
+            cpus_assigned = 0;
+            total_remainders = 0.0;
+            for (int si = 0; si < stages_next; si++) {
+                auto cpus_fp = cpus_left * sp[si];
+                int cpus = std::floor(cpus_fp);
+                assert(cpus >= 0);
+                remainders[si] = cpus_fp - cpus;
+                assert(remainders[si] >= 0.0);
+                total_remainders += remainders[si];
+                reqs[si] += cpus;
+                cpus_assigned += cpus;
+            }
+            assert(cpus_assigned >= 0);
+            if (cpus_assigned > 0) {
+                break;
+            }
+            // At this point, no single stage has sufficiently more priority over the others
+            // to win at least one CPU.
+            // => Perform rebalancing by giving the lowest-priority stage's priority to the
+            // hightest-priority stage. This drives us toward a winner.
+            // NOTE: Refrain from the optimization to pick a single winner and give it all
+            //       other stages priorities directly: while this makes sense if cpus_left == 1,
+            //       all other situations (cpus_left > 1) may be resolved more fairly by doing
+            //       the rebalancing iteratively.
+            //       Example: cpus_left = 2, sp = {1/4, 1/4, 1/4, 1/4}
+            //                => We could rebalance sp' = {1/2, 1/2, 0, 0} and have a fairer
+            //                   outcome than sp' = {1, 0, 0, 0}
+            // TODO: validate this code does the above
+
+            // TODO actually necessary?
+            // think it's a leftover of max_idx == min_idx, but we handle that now
+            assert(stages_next >= 2);
+            // Find leftmost max
+            int max_idx = 0;
+            for (int si = max_idx+1; si < stages_next; si++) {
+                max_idx = sp[si] > sp[max_idx] ? si : max_idx;
+            }
+            // Find rightmost non-0 min
+            int min_idx = stages_next-1;
+            for (int si = min_idx-1; si >= 0; si--) {
+                min_idx = sp[min_idx] == 0.0 || (sp[si] != 0.0 && sp[si] < sp[min_idx])
+                    ? si : min_idx;
+            }
+            if (min_idx == max_idx) {
+                // The aforementioned iterative redistribution failed.
+                // assert: all other elements in sp in stages_next range are 0
+                assert(cpus_left == 1);
+                assert(sp[max_idx] + eps > 1.0);
+                reqs[max_idx] += 1;
+                cpus_assigned++;
+                break;
+            }
+            sp[max_idx] += sp[min_idx];
+            sp[min_idx] = 0.0;
+            number_of_priority_redistrs++;
+        }
+        // Loop invariant:
+        assert(cpus_assigned > 0);
+        assert(cpus_assigned <= cpus_left);
+
+        // Because we can't split CPUs, the remainders are the priority
+        // when distributing the remaining CPUs
+        for (int si = 0; si < stages_next; si++) {
+            sp[si] = remainders[si] / total_remainders;
+        }
+
+        cpus_left -= cpus_assigned;
+        assert(cpus_left >= 0);
+    }
+    // Loop invariant:
+    assert(cpus_left == 0);
+
+    //
+    // PHASE 2: FIND NEW ASSIGNMENT WITH MINIMAL TRANSITION COST
+    //
+
+    auto na = new assignment(a);
+    na->transition_to(reqs);
+
+    //
+    // PHASE 3: USE NEW ASSIGNMENT
+    //
+
+    _assignment.assign(na);
+    rcu_dispose(&a);
+}
+
 stage stage::stages[stage::max_stages];
 mutex stage::stages_mtx;
 int stage::stages_next = 0;
@@ -509,19 +773,70 @@ stage* stage::define(const std::string name) {
     stages_next++;
     next._name = name;
 
+    // Must not create stages after using stage::enqueue because
+    // - update_assignment() does not lock stages_mtx before accessing stages_next
+    // - class assignment can't handle changing stage count
+    assert(_assignment_age == assignment_age_unused);
+
+    // FIXME: technically, above assertion does not protect us from another
+    // FIXME: thread starting to use _assignment via stage::enqueue, so there's
+    // FIXME: a race ... however, all apps converted to stagesched define
+    // FIXME: all stages before they use them, so this will only be a problem
+    // FIXME: if multiple apps use stages.
+    auto ca = _assignment.read_by_owner();
+    auto da = new assignment(cpus.size(), stages_next);
+    _assignment.assign(da);
+    rcu_dispose(ca);
+
     return &next;
 }
 
 cpu *stage::enqueue_policy() {
-    // each stage has 2 cpus
-    // pick the cpu that has fewer threads
-    auto cs = sched::cpus.begin() + _id;
-    return *std::min_element(cs, cs+2, [](cpu *a, cpu *b) { return a->runqueue.size() < b->runqueue.size(); ; });
+
+    // Use existing assignment for ca. max_assignment_age enqueue operations
+    // RCU ensures other CPUs can use the old assignment while we compute the update
+
+    auto is_updater = preemptable() && // preemptable required by update_assignment()
+        _assignment_age.fetch_add(1) == max_assignment_age;
+
+    if (is_updater) {
+        auto begin = osv::clock::uptime::now();
+        // no need for mutex, we are the only updater (see above)
+        update_assignment();
+        // make sure updated assignment is propagated before we reset the counter
+        barrier(); // TODO unsure if necessary, mutex has a barrier() in unlock()
+        _assignment_age.store(0);
+        auto delta = osv::clock::uptime::now() - begin;
+        trace_sched_stage_update_assignment(cpu::current()->id, delta.count());
+    }
+
+    cpu_set acpus;
+    WITH_LOCK(rcu_read_lock) {
+        auto ap =_assignment.read();
+        assert(ap != nullptr);
+        acpus = ap->stage_cpus(this->_id);
+    }
+
+    if (!acpus) {
+        // This should be a rare case: this stage is so irrelevant that
+        // it has not been assigned any dedicated CPU.
+        // => Use CPUs round-robin.
+        // TODO: evaluate against alternative of using CPU with shortest runqueue, see below
+        static std::atomic<int> victimcpu;
+        return sched::cpus[(victimcpu++)%sched::cpus.size()];
+    }
+    auto least_busy = *std::min_element(acpus.begin(), acpus.end(),
+            [](unsigned a, unsigned b){
+        return sched::cpus[a]->runqueue.size() < sched::cpus[b]->runqueue.size();
+    });
+    return sched::cpus[least_busy];
 }
+
 
 void stage::enqueue()
 {
     cpu *target_cpu = enqueue_policy();
+    assert(target_cpu);
 
     /* prohibit migration of this thread off this cpu */
     irq_save_lock_type irq_lock;
@@ -542,7 +857,12 @@ void stage::enqueue()
     auto st_cmpxchg_success = st.compare_exchange_strong(st_before, thread::status::stagemig_run);
     assert(st_cmpxchg_success);
 
-    t->_detached_state->_stage = this;
+    auto& ds_stage = t->_detached_state->_stage ;
+    if (ds_stage) {
+        ds_stage->_c_in--;
+    }
+    ds_stage = this;
+    _c_in++;
 
     if (target_cpu->id == source_cpu->id) {
         st.store(thread::status::running);
