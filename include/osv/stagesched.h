@@ -11,6 +11,8 @@
 #include <string>
 #include <stack>
 
+#include <osv/mutex.h>
+
 namespace sched {
 
     struct cpu;
@@ -58,6 +60,10 @@ namespace sched {
 
         public:
             static const int max_stages = 32;
+        private: /* global state */
+            static stage stages[max_stages];
+            static mutex stages_mtx;
+            static int stages_next;
 
         private: /* per-instance state */
             int _id;

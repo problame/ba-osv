@@ -493,15 +493,15 @@ unsigned cpu::load()
     return runqueue.size();
 }
 
+stage stage::stages[stage::max_stages];
+mutex stage::stages_mtx;
+int stage::stages_next = 0;
+
 stage* stage::define(const std::string name) {
 
-    static mutex _stages_mtx;
-    static stage stages[stage::max_stages];
-    static int stages_next;
+    std::lock_guard<mutex> guard(stages_mtx);
 
-    std::lock_guard<mutex> guard(_stages_mtx);
-
-    if (stages_next == stage::max_stages)
+    if (stages_next == max_stages)
         return nullptr;
 
     auto& next = stages[stages_next];
