@@ -309,8 +309,12 @@ void cpu::reschedule_from_interrupt()
     p->_total_cpu_time += interval;
 
     if (p_status == thread::status::running) {
-        if (runqueue.empty()) {
+        if (p == idle_thread && runqueue.empty()) {
             /* we are the idle thread, let it run */
+            return;
+        }
+        if (p != idle_thread && runqueue.size() == 1) {
+            /* we are the only thread other than the idle thread */
             return;
         }
         /* TODO work-conservation for running threads
@@ -324,19 +328,11 @@ void cpu::reschedule_from_interrupt()
         enqueue(*p);
     }
 
-    /* Find a new thread from CPU-local runqueue
-     * (system threads + already dequeued stage-aware threads) */
-dequeue:
+    /* Find a new thread from CPU-local runqueue */
     auto ni = runqueue.begin();
     auto n = &*ni;
     runqueue.erase(ni);
     assert(n->_detached_state->st.load() == thread::status::queued);
-    if (runqueue.size() >= 2 && n == idle_thread) {
-        /* Poor-man's thread priorities */
-        enqueue(*n);
-        goto dequeue;
-        return;
-    }
 
     n->cputime_estimator_set(now, n->_total_cpu_time);
 
