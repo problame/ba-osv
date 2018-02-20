@@ -326,6 +326,12 @@ void cpu::reschedule_from_interrupt()
         trace_sched_preempt();
         p->stat_preemptions.incr();
         enqueue(*p);
+    } else if (p_status != thread::status::stagemig_run &&
+               p->_detached_state->_stage) {
+        // Stage switch manages _c_in itself
+        // Thread is not runnable and will be scheduled out.
+        // Once it is woken up, handle_incoming_wakups will re-increment this counter
+        p->_detached_state->_stage->_c_in--;
     }
 
     /* Find a new thread from CPU-local runqueue */
@@ -444,6 +450,10 @@ void cpu::handle_incoming_wakeups()
             while (!q.empty()) {
                 auto& t = q.front();
                 auto& st = t._detached_state->st;
+                if (t._detached_state->_stage) {
+                    // Thread is waking up and will thus runnable again
+                    t._detached_state->_stage->_c_in++;
+                }
                 q.pop_front();
                 assert(t.tcpu() == this);
                 if (&t == thread::current()) {

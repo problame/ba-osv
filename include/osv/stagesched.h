@@ -70,8 +70,9 @@ namespace sched {
         private: /* per-instance state */
             int _id;
             std::string _name;
+            friend struct cpu;
+            // _c_in is the number of runnable threads in the stage
             std::atomic<int> _c_in;
-
     };
 
     /**
