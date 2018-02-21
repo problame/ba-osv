@@ -874,7 +874,6 @@ struct cpu : private timer_base::client {
     void do_idle();
     void idle_poll_start();
     void idle_poll_end();
-    void send_wakeup_ipi();
     unsigned load();
     /**
      * Try to reschedule.

@@ -84,8 +84,6 @@ bool __thread need_reschedule = false;
 
 elf::tls_data tls;
 
-inter_processor_interrupt wakeup_ipi{IPI_WAKEUP, [] {}};
-
 constexpr float cmax = 0x1P63;
 constexpr float cinitial = 0x1P-63;
 
@@ -394,15 +392,6 @@ void cpu::idle_poll_end()
 {
     idle_poll.store(false, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_seq_cst);
-}
-
-void cpu::send_wakeup_ipi()
-{
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (!idle_poll.load(std::memory_order_relaxed) && runqueue.size() <= 1) {
-        trace_sched_ipi(id);
-        wakeup_ipi.send(this);
-    }
 }
 
 void cpu::do_idle()
@@ -1518,13 +1507,12 @@ wakeup:
         WITH_LOCK(irq_lock) {
             tcpu->incoming_wakeups[c].push_back(*st->t);
         }
+        // Notify tcpu of the wakeup
         if (!tcpu->incoming_wakeups_mask.test_all_and_set(c)) {
-            // FIXME: avoid if the cpu is alive and if the priority does not
-            // FIXME: warrant an interruption
-            if (tcpu != current()->tcpu()) {
-                tcpu->send_wakeup_ipi();
-            } else {
+            if (tcpu == current()->tcpu()) {
                 need_reschedule = true;
+            } else {
+                // No need for IPIs, handle_incoming_wakups pools incoming_wakups_mask
             }
         }
     }
