@@ -27,6 +27,7 @@
 #include <osv/clock.hh>
 #include <osv/timer-set.hh>
 #include <osv/stagesched.h>
+#include <bitset>
 
 typedef float runtime_t;
 
@@ -70,6 +71,80 @@ extern "C" {
 namespace bi = boost::intrusive;
 
 const unsigned max_cpus = sizeof(unsigned long) * 8;
+
+class bitset_cpu_set {
+public:
+    explicit bitset_cpu_set() : _mask() {}
+    void set(unsigned c) {
+        _mask.set(c);
+    }
+    bool test_and_set(unsigned c) {
+        bool before = _mask.test(c);
+        _mask.set(c);
+        return before;
+    }
+    void reset() { _mask.reset(); }
+    void reset(unsigned c) { _mask.reset(c); }
+    operator bool() const { return _mask.any(); }
+    class iterator;
+    iterator begin() {
+        return iterator(*this);
+    }
+    iterator end() {
+        return iterator(*this, max_cpus);
+    }
+    class iterator {
+    public:
+        explicit iterator(bitset_cpu_set& set)
+            : _set(set), _idx(0) {
+            advance();
+        }
+        explicit iterator(bitset_cpu_set& set, unsigned idx)
+            : _set(set), _idx(idx) {}
+        iterator(const iterator& other)
+            : _set(other._set), _idx(other._idx) {}
+        iterator& operator=(const iterator& other) {
+            if (this != &other) {
+                this->~iterator();
+                new (this) iterator(other);
+            }
+            return *this;
+        }
+        unsigned operator*() { return _idx; }
+        iterator& operator++() {
+            if (++_idx < max_cpus) {
+                advance();
+            }
+            return *this;
+        }
+        iterator operator++(int) {
+            iterator tmp(*this);
+            ++*this;
+            return tmp;
+        }
+        bool operator==(const iterator& other) const {
+            return _idx == other._idx;
+        }
+        bool operator!=(const iterator& other) const {
+            return _idx != other._idx;
+        }
+    private:
+        void advance() {
+            unsigned long tmp = _set._mask.to_ulong();
+            tmp &= ~((1UL << _idx) - 1);
+            if (tmp) {
+                _idx = __builtin_ctzl(tmp);
+            } else {
+                _idx = max_cpus;
+            }
+        }
+    private:
+        bitset_cpu_set& _set;
+        unsigned _idx;
+    };
+private:
+    std::bitset<max_cpus> _mask;
+};
 
 class cpu_set {
 public:

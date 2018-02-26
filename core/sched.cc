@@ -501,8 +501,7 @@ public:
     using requirements = std::array<int, stage::max_stages>;
 private:
     requirements reqs;
-    // TODO do not use cpu_set, it uses atomic instructions where we don't need them
-    std::array<cpu_set, stage::max_stages> cpus_per_stage;
+    std::array<bitset_cpu_set, stage::max_stages> cpus_per_stage;
     int cpus;
     int stages;
 public:
@@ -513,7 +512,7 @@ public:
         assert(stages <= cpus);
         std::fill(reqs.begin(), reqs.begin() + stages, 0);
         for (int si = 0; si < stages; si++) {
-            cpus_per_stage[si].fetch_clear();
+            cpus_per_stage[si].reset();
         }
         for (int c = 0; c < cpus; c++) {
             reqs[c%stages] += 1;
@@ -522,7 +521,7 @@ public:
         validate_reqs(reqs);
     }
 
-    inline cpu_set stage_cpus(int stageno) {
+    inline bitset_cpu_set stage_cpus(int stageno) {
         return cpus_per_stage[stageno];
     }
 
@@ -582,13 +581,13 @@ public:
 
 private:
     inline void transfer_cpus(int from_stage, int to_stage, unsigned amount) {
-        // TODO clever bit counting operations on x86
+        // FIXME clever bit counting operations on x86
         auto& from_set = cpus_per_stage[from_stage];
         auto& to_set = cpus_per_stage[to_stage];
         for (auto f : from_set) {
             if (amount == 0) break;
             if (!to_set.test_and_set(f)) {
-                from_set.clear(f);
+                from_set.reset(f);
             }
             amount--;
         }
@@ -817,7 +816,7 @@ cpu *stage::enqueue_policy() {
         _assignment_age.store(0);
     }
 
-    cpu_set acpus;
+    bitset_cpu_set acpus;
     WITH_LOCK(rcu_read_lock) {
         auto ap =_assignment.read();
         assert(ap != nullptr);
