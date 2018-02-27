@@ -70,9 +70,8 @@ TRACEPOINT(trace_thread_create, "thread=%p", thread*);
 TRACEPOINT(trace_sched_stage_enqueue, "stage=%p scpu=%d tcpu=%d thread=%p", stage*, unsigned, unsigned, thread*);
 TRACEPOINT(trace_sched_stage_dequeue, "dcpu=%d thread=%p", unsigned, thread*);
 TRACEPOINT(trace_sched_stage_dequeue_stagemig, "dcpu=%d thread=%p", unsigned, thread*);
-TRACEPOINT(trace_sched_stage_update_assignment, "cpu=%d ns=%d", unsigned, int);
-// TODO more elegant way to support sched::stage::max_stages
-TRACEPOINT(trace_sched_stage_update_assignment_stages_cin, "0=%d 1=%d 2=%d 3=%d 4=%d 5=%d 6=%d 7=%d", int, int, int, int, int, int, int, int);
+// TODO more elegant way to support sched::stage::max_stages and sched::max_cpus
+TRACEPOINT(trace_sched_stage_update_assignment, "cpu=%d ns=%d c0=%d c1=%d c2=%d c3=%d c4=%d c5=%d c6=%d c7=%d s0=%lx s1=%lx s2=%lx s3=%lx", unsigned, int, int, int, int, int, int, int, int, int, unsigned long, unsigned long, unsigned long, unsigned long);
 
 std::vector<cpu*> cpus __attribute__((init_priority((int)init_prio::cpus)));
 
@@ -619,6 +618,8 @@ void stage::update_assignment()
 
     assert(preemptable()); // we use 'new'
 
+    auto begin = osv::clock::uptime::now();
+
     auto& a = *_assignment.read_by_owner();
     constexpr float eps = 0.003;
 
@@ -637,9 +638,6 @@ void stage::update_assignment()
     }
     static_assert(max_stages >= 8);
     std::fill(stage_sizes.begin()+stages_next, stage_sizes.end(), 0);
-    trace_sched_stage_update_assignment_stages_cin(stage_sizes[0],
-        stage_sizes[1], stage_sizes[2], stage_sizes[3], stage_sizes[4],
-        stage_sizes[5], stage_sizes[6], stage_sizes[7]);
 
     // Record CPU distribution in reqs (see assignment::validate_reqs)
     // TODO: encapsulate requirements into opaque type
@@ -744,6 +742,23 @@ void stage::update_assignment()
     auto na = new assignment(a);
     na->transition_to(reqs);
 
+    auto updater_time = osv::clock::uptime::now() - begin;
+
+    trace_sched_stage_update_assignment(cpu::current()->id, updater_time.count(),
+            stage_sizes[0],
+            stage_sizes[1],
+            stage_sizes[2],
+            stage_sizes[3],
+            stage_sizes[4],
+            stage_sizes[5],
+            stage_sizes[6],
+            stage_sizes[7],
+            na->stage_cpus(0).to_ulong(),
+            na->stage_cpus(1).to_ulong(),
+            na->stage_cpus(2).to_ulong(),
+            na->stage_cpus(3).to_ulong()
+            );
+
     //
     // PHASE 3: USE NEW ASSIGNMENT
     //
@@ -793,16 +808,13 @@ cpu *stage::enqueue_policy() {
 
     auto is_updater = preemptable() && // preemptable required by update_assignment()
         _assignment_age.fetch_add(1) == max_assignment_age;
-
     if (is_updater) {
-        auto begin = osv::clock::uptime::now();
         // no need for mutex, we are the only updater (see above)
         update_assignment();
         // make sure updated assignment is propagated before we reset the counter
         barrier(); // TODO unsure if necessary, mutex has a barrier() in unlock()
+        // restart aging after we collected the statistics
         _assignment_age.store(0);
-        auto delta = osv::clock::uptime::now() - begin;
-        trace_sched_stage_update_assignment(cpu::current()->id, delta.count());
     }
 
     cpu_set acpus;
