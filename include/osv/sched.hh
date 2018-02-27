@@ -75,17 +75,16 @@ const unsigned max_cpus = sizeof(unsigned long) * 8;
 class bitset_cpu_set {
 public:
     explicit bitset_cpu_set() : _mask() {}
-    void set(unsigned c) {
-        _mask.set(c);
-    }
-    bool test_and_set(unsigned c) {
+    inline void set(unsigned c) { _mask.set(c); }
+    inline bool test_and_set(unsigned c) {
         bool before = _mask.test(c);
         _mask.set(c);
         return before;
     }
-    void reset() { _mask.reset(); }
-    void reset(unsigned c) { _mask.reset(c); }
-    operator bool() const { return _mask.any(); }
+    inline void reset() { _mask.reset(); }
+    inline void reset(unsigned c) { _mask.reset(c); }
+    inline operator bool() const { return _mask.any(); }
+    inline unsigned long to_ulong() { return _mask.to_ulong(); }
     class iterator;
     iterator begin() {
         return iterator(*this);
