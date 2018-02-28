@@ -528,6 +528,7 @@ public:
 private:
 
     // Assert that reqs requires exactly as many cores as we have available
+    // FIXME: replace with consistency check that also checks cpus_per_stage
     inline void validate_reqs(const requirements& reqs) {
         int core_sum = 0;
         for (int si = 0; si < stages; si++) {
@@ -577,6 +578,7 @@ public:
             }
             assert(req_delta[si] == 0);
         }
+        reqs = new_reqs;
     }
 
 private:
@@ -591,6 +593,7 @@ private:
             }
             amount--;
         }
+        assert(amount == 0);
     }
 };
 
