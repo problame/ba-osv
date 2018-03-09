@@ -553,7 +553,7 @@ void sync(vfs_file* fp, off_t start, off_t end)
     }
 }
 
-TRACEPOINT(trace_access_scanner, "scanned=%u, cleared=%u, %%cpu=%g", unsigned, unsigned, double);
+TRACEPOINT(trace_access_scanner, "scanned=%u, cleared=%u, %%cpu=%g duration=%d", unsigned, unsigned, double, int);
 static class access_scanner {
     static constexpr double _max_cpu = 20;
     static constexpr double _min_cpu = 0.1;
@@ -591,6 +591,8 @@ private:
             double sleep = 1000000000 - work;
 
             sched::thread::sleep(std::chrono::nanoseconds(static_cast<unsigned long>(sleep/_freq)));
+
+            auto trace_start = std::chrono::steady_clock::now();
 
             auto start = sched::thread::current()->thread_clock();
             auto deadline = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::nanoseconds(static_cast<unsigned long>(work/_freq))) + start;
@@ -637,7 +639,8 @@ private:
                 _cpu = std::max(_min_cpu, std::min(_max_cpu, _cpu * ((cleared*5.0)/scanned)));
             }
 
-            trace_access_scanner(scanned, cleared, _cpu);
+            std::chrono::nanoseconds trace_duration = std::chrono::steady_clock::now() - trace_start;
+            trace_access_scanner(scanned, cleared, _cpu, trace_duration.count());
 
             // decay old results a bit
             scanned /= 4;
