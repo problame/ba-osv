@@ -381,17 +381,23 @@ void cpu::send_wakeup_ipi()
     }
 }
 
+// defaults are upstream behavior
+bool cpu::idle_nospin = false;
+int cpu::idle_empty_strategy = 1;
+
 void cpu::do_idle()
 {
     do {
-        idle_poll_lock_type idle_poll_lock{*this};
-        WITH_LOCK(idle_poll_lock) {
-            // spin for a bit before halting
-            for (unsigned ctr = 0; ctr < 10000; ++ctr) {
-                // FIXME: can we pull threads from loaded cpus?
-                handle_incoming_wakeups();
-                if (!runqueue.empty()) {
-                    return;
+        if (!idle_nospin) {
+            idle_poll_lock_type idle_poll_lock{*this};
+            WITH_LOCK(idle_poll_lock) {
+                // spin for a bit before halting
+                for (unsigned ctr = 0; ctr < 10000; ++ctr) {
+                    // FIXME: can we pull threads from loaded cpus?
+                    handle_incoming_wakeups();
+                    if (!runqueue.empty()) {
+                        return;
+                    }
                 }
             }
         }
@@ -400,8 +406,19 @@ void cpu::do_idle()
         if (!runqueue.empty()) {
             return;
         }
-        guard.release();
-        arch::wait_for_interrupt(); // this unlocks irq_lock
+        if (idle_empty_strategy == 0) {
+            guard.unlock();
+        } else if (idle_empty_strategy == 1) {
+            guard.release();
+            arch::wait_for_interrupt(); // this unlocks irq_lock
+        } else if (idle_empty_strategy == 2) {
+            guard.unlock();
+            static_assert(sizeof(cpu::current()->incoming_wakeups_mask) == 8);
+            arch::monitor(&cpu::current()->incoming_wakeups_mask, 0, 0);
+            arch::mwait(0, 0);
+        } else {
+            assert(false);
+        }
         handle_incoming_wakeups();
     } while (runqueue.empty());
 }

@@ -857,6 +857,8 @@ struct cpu : private timer_base::client {
     bool poll_wakeup_queue();
     void idle();
     void do_idle();
+    static bool idle_nospin;
+    static int idle_empty_strategy;
     void idle_poll_start();
     void idle_poll_end();
     void send_wakeup_ipi();

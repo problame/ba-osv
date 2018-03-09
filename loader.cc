@@ -177,6 +177,8 @@ void parse_options(int loader_argc, char** loader_argv)
         ("nameserver", bpo::value<std::string>(), "set nameserver address")
         ("delay", bpo::value<float>()->default_value(0), "delay in seconds before boot")
         ("redirect", bpo::value<std::string>(), "redirect stdout and stderr to file")
+        ("idle_nospin", bpo::value<int>(), "do not spin before idle_empty_strategy in cpu::do_idle")
+        ("idle_empty_strategy", bpo::value<int>(), "0 for busy, 1 for halt, 2 for mwait")
     ;
     bpo::variables_map vars;
     // don't allow --foo bar (require --foo=bar) so we can find the first non-option
@@ -287,6 +289,14 @@ void parse_options(int loader_argc, char** loader_argv)
 
     if (vars.count("redirect")) {
         opt_redirect = vars["redirect"].as<std::string>();
+    }
+
+    if (vars.count("idle_nospin")) {
+        sched::cpu::idle_nospin = vars["idle_nospin"].as<int>() != 0;
+    }
+
+    if (vars.count("idle_empty_strategy")) {
+        sched::cpu::idle_empty_strategy = vars["idle_empty_strategy"].as<int>();
     }
 
     boot_delay = std::chrono::duration_cast<std::chrono::nanoseconds>(1_s * vars["delay"].as<float>());
