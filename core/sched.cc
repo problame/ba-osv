@@ -638,6 +638,10 @@ void stage::update_assignment()
         stage_sizes[si] = stages[si]._c_in;
         total_c_in += stage_sizes[si];
     }
+    if (total_c_in <= 0) {
+        return;
+    }
+
     static_assert(max_stages >= 8);
     std::fill(stage_sizes.begin()+stages_next, stage_sizes.end(), 0);
 
