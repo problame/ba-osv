@@ -813,7 +813,22 @@ stage* stage::define(const std::string name) {
     return &next;
 }
 
+int stage::fixed_cpus_per_stage = 0;
+
 cpu *stage::enqueue_policy() {
+
+    // Fixed assignment?
+    if (fixed_cpus_per_stage) {
+        bitset_cpu_set acpus;
+        acpus.reset();
+        acpus.set(fixed_cpus_per_stage * _id + 0);
+        acpus.set(fixed_cpus_per_stage * _id + 1);
+        auto least_busy = *std::min_element(acpus.begin(), acpus.end(),
+                [](unsigned a, unsigned b){
+            return sched::cpus[a]->runqueue.size() < sched::cpus[b]->runqueue.size();
+        });
+        return sched::cpus[least_busy];
+    }
 
     // Use existing assignment for ca. max_assignment_age enqueue operations
     // RCU ensures other CPUs can use the old assignment while we compute the update

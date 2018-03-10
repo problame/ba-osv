@@ -178,6 +178,7 @@ void parse_options(int loader_argc, char** loader_argv)
         ("delay", bpo::value<float>()->default_value(0), "delay in seconds before boot")
         ("redirect", bpo::value<std::string>(), "redirect stdout and stderr to file")
         ("stage.max_assignment_age", bpo::value<int>(), "")
+        ("stage.fixed_cpus_per_stage", bpo::value<int>(), "enable fixed core assignment with given number of cores per stage")
         ("idle_mwait", bpo::value<int>(), "use mwait in cpu::do_idle")
     ;
     bpo::variables_map vars;
@@ -293,6 +294,10 @@ void parse_options(int loader_argc, char** loader_argv)
 
     if (vars.count("stage.max_assignment_age")) {
         sched::stage::max_assignment_age = vars["stage.max_assignment_age"].as<int>();
+    }
+
+    if (vars.count("stage.fixed_cpus_per_stage")) {
+        sched::stage::fixed_cpus_per_stage = vars["stage.fixed_cpus_per_stage"].as<int>();
     }
 
     if (vars.count("idle_mwait")) {

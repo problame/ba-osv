@@ -62,6 +62,7 @@ namespace sched {
         public:
             static const int max_stages = 32;
             static int max_assignment_age;
+            static int fixed_cpus_per_stage;
         private: /* global state */
             static stage stages[max_stages];
             static mutex stages_mtx;
