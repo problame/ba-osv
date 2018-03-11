@@ -608,9 +608,9 @@ private:
 // header is directly used by applications
 // FIXME: better encapsulation of policy code
 static osv::rcu_ptr<assignment> _assignment;
-int stage::max_assignment_age = 100;
-constexpr int assignment_age_unused = -1;
-static std::atomic<int> _assignment_age(assignment_age_unused);
+std::chrono::nanoseconds stage::max_assignment_age(100*1000000); // 100ms
+static std::atomic<bool> _assignment_updating;
+static std::chrono::time_point<std::chrono::steady_clock> _assignment_creation;
 
 /**
  * Compute stages' CPU-requirements and update the current
@@ -798,7 +798,7 @@ stage* stage::define(const std::string name) {
     // Must not create stages after using stage::enqueue because
     // - update_assignment() does not lock stages_mtx before accessing stages_next
     // - class assignment can't handle changing stage count
-    assert(_assignment_age == assignment_age_unused);
+    // FIXME above
 
     // FIXME: technically, above assertion does not protect us from another
     // FIXME: thread starting to use _assignment via stage::enqueue, so there's
@@ -808,6 +808,7 @@ stage* stage::define(const std::string name) {
     auto ca = _assignment.read_by_owner();
     auto da = new assignment(cpus.size(), stages_next);
     _assignment.assign(da);
+    _assignment_creation = std::chrono::steady_clock::now();
     rcu_dispose(ca);
 
     return &next;
@@ -832,16 +833,19 @@ cpu *stage::enqueue_policy() {
 
     // Use existing assignment for ca. max_assignment_age enqueue operations
     // RCU ensures other CPUs can use the old assignment while we compute the update
-
-    auto is_updater = preemptable() && // preemptable required by update_assignment()
-        _assignment_age.fetch_add(1) == max_assignment_age;
+    std::chrono::nanoseconds assignment_age = std::chrono::steady_clock::now() - _assignment_creation;
+    auto can_updater = preemptable() && // preemptable required by update_assignment()
+         assignment_age > max_assignment_age;
+    auto already_updating = false;
+    auto is_updater = can_updater && _assignment_updating.compare_exchange_strong(already_updating, true);
     if (is_updater) {
         // no need for mutex, we are the only updater (see above)
         update_assignment();
         // make sure updated assignment is propagated before we reset the counter
         barrier(); // TODO unsure if necessary, mutex has a barrier() in unlock()
         // restart aging after we collected the statistics
-        _assignment_age.store(0);
+        _assignment_creation = std::chrono::steady_clock::now();
+        _assignment_updating.store(false);
     }
 
     bitset_cpu_set acpus;

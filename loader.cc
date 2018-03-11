@@ -48,6 +48,7 @@
 #include <dirent.h>
 #include <iostream>
 #include <fstream>
+#include <chrono>
 
 #include "drivers/zfs.hh"
 #include "drivers/random.hh"
@@ -177,7 +178,7 @@ void parse_options(int loader_argc, char** loader_argv)
         ("nameserver", bpo::value<std::string>(), "set nameserver address")
         ("delay", bpo::value<float>()->default_value(0), "delay in seconds before boot")
         ("redirect", bpo::value<std::string>(), "redirect stdout and stderr to file")
-        ("stage.max_assignment_age", bpo::value<int>(), "")
+        ("stage.max_assignment_age", bpo::value<int64_t>(), "maximum age for a core assignment (nanoseconds)")
         ("stage.fixed_cpus_per_stage", bpo::value<int>(), "enable fixed core assignment with given number of cores per stage")
         ("idle_mwait", bpo::value<int>(), "use mwait in cpu::do_idle")
     ;
@@ -293,7 +294,7 @@ void parse_options(int loader_argc, char** loader_argv)
     }
 
     if (vars.count("stage.max_assignment_age")) {
-        sched::stage::max_assignment_age = vars["stage.max_assignment_age"].as<int>();
+        sched::stage::max_assignment_age = std::chrono::nanoseconds(vars["stage.max_assignment_age"].as<int64_t>());
     }
 
     if (vars.count("stage.fixed_cpus_per_stage")) {
