@@ -76,6 +76,7 @@ class bitset_cpu_set {
 public:
     explicit bitset_cpu_set() : _mask() {}
     inline void set(unsigned c) { _mask.set(c); }
+    inline bool test(unsigned c) { return _mask.test(c); }
     inline bool test_and_set(unsigned c) {
         bool before = _mask.test(c);
         _mask.set(c);

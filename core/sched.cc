@@ -629,9 +629,16 @@ void stage::update_assignment()
 
     // Fetch all stages' _c_in and cache it locally
     std::array<int, max_stages> stage_sizes;
+    std::fill(stage_sizes.begin(), stage_sizes.end(), 0);
     int total_c_in = 0;
     for (int si = 0; si < stages_next; si++) {
-        stage_sizes[si] = stages[si]._c_in;
+        auto stage_cpus = a.stage_cpus(si);
+        for (cpu *c : cpus) {
+            if (stage_cpus.test(c->id)) {
+                stage_sizes[si] += c->load();
+            }
+        }
+        stage_sizes[si] += stages[si]._c_in;
         total_c_in += stage_sizes[si];
     }
     if (total_c_in <= 0) {
@@ -639,7 +646,6 @@ void stage::update_assignment()
     }
 
     static_assert(max_stages >= 8);
-    std::fill(stage_sizes.begin()+stages_next, stage_sizes.end(), 0);
 
     // Record CPU distribution in reqs (see assignment::validate_reqs)
     // TODO: encapsulate requirements into opaque type
