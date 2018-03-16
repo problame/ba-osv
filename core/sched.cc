@@ -323,6 +323,9 @@ void cpu::reschedule_from_interrupt()
         trace_sched_preempt();
         p->stat_preemptions.incr();
         enqueue(*p);
+    } else if (p->_detached_state->_stage) {
+        // thread is not runnable
+        p->_detached_state->_stage->_c_in--;
     }
 
     /* Find a new thread from CPU-local runqueue */
@@ -463,6 +466,9 @@ void cpu::handle_incoming_wakeups()
                         assert(st_before == thread::status::waking_run);
                     }
                     enqueue(t);
+                    if (t._detached_state->_stage) {
+                        t._detached_state->_stage->_c_in++;
+                    }
                     assert(t._detached_state->_cpu == this); // can't do that in resume_timers
                     t.resume_timers(this);
                 }
@@ -598,10 +604,11 @@ private:
 // header is directly used by applications
 // FIXME: better encapsulation of policy code
 static osv::rcu_ptr<assignment> _assignment;
-std::chrono::nanoseconds stage::max_assignment_age(100*1000000); // 100ms
+std::chrono::nanoseconds stage::max_assignment_age(20*1000000); // 20ms
 static std::atomic<bool> _assignment_updating;
 static std::chrono::time_point<std::chrono::steady_clock> _assignment_creation;
-
+static constexpr float _stage_sizes_expavg_factor = 0.1;
+static std::array<float, stage::max_stages> _stage_sizes_expavg;
 /**
  * Compute stages' CPU-requirements and update the current
  * CPU assignment, _assignment.
@@ -630,18 +637,20 @@ void stage::update_assignment()
     // Fetch all stages' _c_in and cache it locally
     std::array<int, max_stages> stage_sizes;
     std::fill(stage_sizes.begin(), stage_sizes.end(), 0);
-    int total_c_in = 0;
     for (int si = 0; si < stages_next; si++) {
-        auto stage_cpus = a.stage_cpus(si);
-        for (cpu *c : cpus) {
-            if (stage_cpus.test(c->id)) {
-                stage_sizes[si] += c->load();
-            }
-        }
-        stage_sizes[si] += stages[si]._c_in;
-        total_c_in += stage_sizes[si];
+        stage_sizes[si] = stages[si]._c_in;
     }
-    if (total_c_in <= 0) {
+
+    std::array<float, max_stages> stage_sizes_f;
+    float total_stage_load = 0.0;
+    for (int si = 0; si < stages_next; si++) {
+        static_assert(_stage_sizes_expavg_factor < 1.0);
+        stage_sizes_f[si] = _stage_sizes_expavg_factor * (float)stage_sizes[si]
+                            + (1.0f - _stage_sizes_expavg_factor) * _stage_sizes_expavg[si];
+        _stage_sizes_expavg[si] = stage_sizes_f[si];
+        total_stage_load += stage_sizes_f[si];
+    }
+    if (total_stage_load <= 0.0) {
         return;
     }
 
@@ -657,7 +666,7 @@ void stage::update_assignment()
     // First round of priorities is proportional to _c_in
     float sp_total = 0.0;
     for (int si = 0; si < stages_next; si++) {
-        sp[si] = (float)stage_sizes[si] / total_c_in;
+        sp[si] = stage_sizes_f[si] / total_stage_load;
         sp_total += sp[si];
     }
     assert(sp_total <= 1.0 + eps);
@@ -856,8 +865,9 @@ cpu *stage::enqueue_policy() {
         // it has not been assigned any dedicated CPU.
         // => Use CPUs round-robin.
         // TODO: evaluate against alternative of using CPU with shortest runqueue, see below
-        static std::atomic<int> victimcpu;
-        return sched::cpus[(victimcpu++)%sched::cpus.size()];
+        //static std::atomic<int> victimcpu;
+        //return sched::cpus[(victimcpu++)%sched::cpus.size()];
+        return sched::cpus[cpus.size()-1];
     }
     auto least_busy = *std::min_element(acpus.begin(), acpus.end(),
             [](unsigned a, unsigned b){
@@ -891,12 +901,15 @@ void stage::enqueue()
     auto st_cmpxchg_success = st.compare_exchange_strong(st_before, thread::status::stagemig_run);
     assert(st_cmpxchg_success);
 
-    auto& ds_stage = t->_detached_state->_stage ;
+    auto& ds_stage = t->_detached_state->_stage;
     if (ds_stage) {
         ds_stage->_c_in--;
     }
     ds_stage = this;
-    _c_in++;
+    // to reschedule_from_interrupt, this operation will look like we are scheduling out,
+    // hence it will decrement the _c_in of the target stage (this) instead of the previous stage
+    // (which we did above).
+    this->_c_in++;
 
     if (target_cpu->id == source_cpu->id) {
         st.store(thread::status::running);
@@ -970,6 +983,9 @@ void stage::dequeue()
         assert(t->_detached_state->_cpu == cpu::current());
         trace_sched_stage_dequeue(cpu::current()->id, t);
         cpu::current()->enqueue(*t);
+        if (t->_detached_state->_stage) {
+            t->_detached_state->_stage->_c_in++;
+        }
         t->resume_timers(cpu::current());
     }
 
