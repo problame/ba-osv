@@ -548,10 +548,10 @@ void thread::pin(cpu *target_cpu)
 // function to pin another thread:
 void thread::pin(thread *t, cpu *target_cpu)
 {
-    if (t == current()) {
-        thread::pin(target_cpu);
-        return;
-    }
+    //if (t == current()) {
+    //    thread::pin(target_cpu);
+    //    return;
+    //}
     // To work on the target thread, we need to run code on the same CPU on
     // where the target thread is currently running. We start here a new
     // helper thread to follow the target thread's CPU. We could have also
@@ -687,6 +687,37 @@ void thread::unpin()
     helper->join();
 }
 
+stage stage::stages[stage::max_stages];
+mutex stage::stages_mtx;
+int stage::stages_next = 0;
+int stage::fixed_cpus_per_stage = 1;
+
+stage* stage::define(const std::string name) {
+
+    std::lock_guard<mutex> guard(stages_mtx);
+
+    if (stages_next == max_stages)
+        return nullptr;
+
+    auto& next = stages[stages_next];
+    next._id = stages_next;
+    stages_next++;
+    next._name = name;
+    return &next;
+}
+
+void stage::enqueue() {
+	register cpu_set acpus{};
+	acpus.set(fixed_cpus_per_stage * _id + 0);
+	acpus.set(fixed_cpus_per_stage * _id + 1);
+	auto least_busy = *std::min_element(acpus.begin(), acpus.end(),
+			[](unsigned a, unsigned b){
+			return sched::cpus[a]->runqueue.size() < sched::cpus[b]->runqueue.size();
+			});
+	auto target_cpu = sched::cpus[least_busy];
+	thread::pin(thread::current(), target_cpu);
+}
+
 void cpu::load_balance()
 {
     notifier::fire();
@@ -694,6 +725,7 @@ void cpu::load_balance()
     while (true) {
         tmr.set(osv::clock::uptime::now() + 100_ms);
         thread::wait_until([&] { return tmr.expired(); });
+        continue;
         if (runqueue.empty()) {
             continue;
         }

@@ -1,0 +1,3 @@
+libfakeosv is a shared library mocking the OSv-only system interfaces such that
+binaries using them can be executed on Linux.
+

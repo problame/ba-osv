@@ -56,6 +56,8 @@
 
 #include "libc/network/__dns.hh"
 
+#include <osv/stagesched.h>
+
 using namespace osv;
 using namespace osv::clock::literals;
 
@@ -179,6 +181,7 @@ void parse_options(int loader_argc, char** loader_argv)
         ("redirect", bpo::value<std::string>(), "redirect stdout and stderr to file")
         ("idle_nospin", bpo::value<int>(), "do not spin before idle_empty_strategy in cpu::do_idle")
         ("idle_empty_strategy", bpo::value<int>(), "0 for busy, 1 for halt, 2 for mwait")
+        ("stage.fixed_cpus_per_stage", bpo::value<int>(), "number of fixed core assignment for stage API")
     ;
     bpo::variables_map vars;
     // don't allow --foo bar (require --foo=bar) so we can find the first non-option
@@ -297,6 +300,10 @@ void parse_options(int loader_argc, char** loader_argv)
 
     if (vars.count("idle_empty_strategy")) {
         sched::cpu::idle_empty_strategy = vars["idle_empty_strategy"].as<int>();
+    }
+
+    if (vars.count("stage.fixed_cpus_per_stage")) {
+        sched::stage::fixed_cpus_per_stage = vars["stage.fixed_cpus_per_stage"].as<int>();
     }
 
     boot_delay = std::chrono::duration_cast<std::chrono::nanoseconds>(1_s * vars["delay"].as<float>());
