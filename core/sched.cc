@@ -377,7 +377,9 @@ void cpu::send_wakeup_ipi()
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!idle_poll.load(std::memory_order_relaxed) && runqueue.size() <= 1) {
         trace_sched_ipi(id);
-        wakeup_ipi.send(this);
+        if (cpu::idle_empty_strategy == 1) {
+            wakeup_ipi.send(this);
+        }
     }
 }
 
