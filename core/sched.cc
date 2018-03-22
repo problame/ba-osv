@@ -26,6 +26,7 @@
 #include <osv/preempt-lock.hh>
 #include <osv/app.hh>
 #include <osv/symbols.hh>
+#include <osv/stagesched.h>
 
 MAKE_SYMBOL(sched::thread::current);
 MAKE_SYMBOL(sched::cpu::current);
