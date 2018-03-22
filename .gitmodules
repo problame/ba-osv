@@ -53,3 +53,6 @@
 [submodule "external/scripts/qemu-affinity"]
 	path = external/scripts/qemu-affinity
 	url = https://github.com/zegelin/qemu-affinity.git
+[submodule "cs_osv_apps"]
+	path = cs_osv_apps
+	url = https://github.com/problame/ba-osv-apps
