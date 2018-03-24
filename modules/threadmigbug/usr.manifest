@@ -1,0 +1,3 @@
+[manifest]
+/threadmigbug: ${MODULE_DIR}/threadmigbug
+
