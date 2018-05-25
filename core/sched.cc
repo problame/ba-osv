@@ -72,6 +72,7 @@ TRACEPOINT(trace_sched_stage_dequeue, "dcpu=%d thread=%p", unsigned, thread*);
 TRACEPOINT(trace_sched_stage_dequeue_stagemig, "dcpu=%d thread=%p", unsigned, thread*);
 // TODO more elegant way to support sched::stage::max_stages and sched::max_cpus
 TRACEPOINT(trace_sched_stage_update_assignment, "cpu=%d ns=%d c0=%d c1=%d c2=%d c3=%d c4=%d c5=%d c6=%d c7=%d s0=%lx s1=%lx s2=%lx s3=%lx", unsigned, int, int, int, int, int, int, int, int, int, unsigned long, unsigned long, unsigned long, unsigned long);
+TRACEPOINT(trace_sched_stage_ht_load, "cpu=%d load=%d", unsigned, int);
 
 std::vector<cpu*> cpus __attribute__((init_priority((int)init_prio::cpus)));
 
@@ -343,6 +344,7 @@ void cpu::reschedule_from_interrupt()
     }
     n->stat_switches.incr();
 
+    trace_sched_stage_ht_load(this->id, runqueue.size());
     trace_sched_load(runqueue.size());
 
     n->_detached_state->st.store(thread::status::running);
@@ -823,6 +825,45 @@ int stage::fixed_cpus_per_stage = 0;
 
 cpu *stage::enqueue_policy() {
 
+    if (fixed_cpus_per_stage == -23) {
+
+        fixed_cpus_per_stage = 2;
+        assert(sched::cpus.size() == 12);
+
+        // assume cores are ordered by Logical Processor number, then core (like on Linux)
+        assert(sched::cpus.size() % 2 == 0);
+        int lp_buddy_offset = sched::cpus.size() / 2;
+        lp_buddy_offset = 6;
+
+        // find least busy core (!= logical processor)
+        std::array<int,2> agg_core_runq_len;
+        for (auto& cc : agg_core_runq_len) {
+            cc = sched::cpus[                  _id * fixed_cpus_per_stage + (&cc - &*agg_core_runq_len.begin())]->runqueue.size() +
+                 sched::cpus[lp_buddy_offset + _id * fixed_cpus_per_stage + (&cc - &*agg_core_runq_len.begin())]->runqueue.size();
+        }
+
+        auto least_busy_core_it = std::min_element(agg_core_runq_len.begin(), agg_core_runq_len.end());
+        int corenum = least_busy_core_it - agg_core_runq_len.begin();
+
+        // always return LP0 because this is the one used in stage::dequeue (shared between the two LPs we summed up above)
+        int cpuid = _id * fixed_cpus_per_stage + corenum;
+        while (!(cpuid < 6));
+//        assert(cpuid < 6);
+        auto cpu = sched::cpus[cpuid];
+        return cpu;
+
+        //// find least busy logical processor
+        //std::array<cpu*,2> lps({
+        //    sched::cpus[                  _id * fixed_cpus_per_stage + corenum],
+        //    sched::cpus[lp_buddy_offset + _id * fixed_cpus_per_stage + corenum]
+        //    });
+
+        //return *std::min_element(lps.begin(), lps.end(),
+        //        [](cpu*& a, cpu*& b){
+        //    return a->runqueue.size() < b->runqueue.size();
+        //});
+    }
+
     // Fixed assignment?
     if (fixed_cpus_per_stage) {
         bitset_cpu_set acpus;
@@ -881,6 +922,8 @@ void stage::enqueue()
 {
     cpu *target_cpu = enqueue_policy();
     assert(target_cpu);
+    assert(target_cpu->id < 6);
+    auto target_cpu_lp1 = sched::cpus[target_cpu->id + 6];
 
     /* prohibit migration of this thread off this cpu */
     irq_save_lock_type irq_lock;
@@ -911,7 +954,7 @@ void stage::enqueue()
     // (which we did above).
     this->_c_in++;
 
-    if (target_cpu->id == source_cpu->id) {
+    if (target_cpu->id % 6 == source_cpu->id % 6) {
         st.store(thread::status::running);
         source_cpu->reschedule_from_interrupt(); // releases guard
         return;
@@ -931,6 +974,10 @@ void stage::enqueue()
     // but target_cpu->stagesched_incoming avoid target_cpu
     target_cpu->stagesched_incoming.push(t);
     target_cpu->incoming_wakeups_mask.set(source_cpu->id);
+    target_cpu->incoming_wakeups_mask.set(source_cpu->id);
+    target_cpu_lp1->incoming_wakeups_mask.set(source_cpu->id);
+    target_cpu_lp1->incoming_wakeups_mask.set(source_cpu->id);
+
 
     /* find another thread to run on source_cpu and make sure that c is marked
      * runnable once source_cpu doesn't execute it anymore so that target_cpu
@@ -951,7 +998,25 @@ void stage::dequeue()
     irq_save_lock_type irq_lock;
     std::lock_guard<irq_save_lock_type> guard(irq_lock);
 
-    auto inq = &cpu::current()->stagesched_incoming;
+    if (sched::cpus.size() == 1) {
+        return;
+    }
+
+    constexpr int count_cores = 6, count_lps = 12;
+    while(!(sched::cpus.size() == count_lps));
+//    assert(sched::cpus.size() == count_lps);
+    auto core = sched::cpus[cpu::current()->id % count_cores];
+
+    // Aquire core spinlock (compete with other logical processor)
+    auto busy = false;
+    while (!core->stagesched_incoming_lp_lock.compare_exchange_strong(busy, true)) {
+        busy = false;
+//        asm volatile ("pause\n\t");
+        arch::monitor(&core->stagesched_incoming_lp_lock, 0, 0);
+        arch::mwait(0, 0);
+    }
+
+    auto inq = &core->stagesched_incoming;
 
     /* fully drain inq
      * FIXME the runtime of the loop is unbounded.
@@ -968,26 +1033,35 @@ void stage::dequeue()
     thread *t;
     while ((t = inq->pop()) != nullptr) {
         auto& st = t->_detached_state->st;
-        while(true) {
-            /* This situation is unlikely:
-             * t's source CPU has not completed the context switch yet.
-             * The source_cpu is likely somewhere between stagesched_incoming.push() and
-             * thread::switch_to's */
-            auto st_before = thread::status::stagemig_sto;
-            if (st.compare_exchange_strong(st_before, thread::status::queued)) {
-                break;
-            }
-            trace_sched_stage_dequeue_stagemig(cpu::current()->id, t);
+
+        /* This situation is unlikely:
+         * t's source CPU has not completed the context switch yet.
+         * The source_cpu is likely somewhere between stagesched_incoming.push() and
+         * thread::switch_to's */
+        auto st_before = thread::status::stagemig_sto;
+        if (!st.compare_exchange_strong(st_before, thread::status::queued)) {
             assert(st_before == thread::status::stagemig_run);
+            inq->push(t);
+            break;
         }
-        assert(t->_detached_state->_cpu == cpu::current());
+
+        trace_sched_stage_dequeue_stagemig(cpu::current()->id, t); // FIXME
+
+        while(!(t->_detached_state->_cpu->id % count_cores == cpu::current()->id % count_cores));
+        //assert(t->_detached_state->_cpu->id % count_cores == cpu::current()->id % count_cores);
+        t->_detached_state->_cpu = cpu::current();
+        t->remote_thread_local_var(percpu_base) = cpu::current()->percpu_base;
+        t->remote_thread_local_var(current_cpu) = cpu::current();
         trace_sched_stage_dequeue(cpu::current()->id, t);
         cpu::current()->enqueue(*t);
         if (t->_detached_state->_stage) {
             t->_detached_state->_stage->_c_in++;
         }
         t->resume_timers(cpu::current());
+
     }
+
+    core->stagesched_incoming_lp_lock.store(false);
 
 }
 

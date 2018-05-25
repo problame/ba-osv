@@ -936,6 +936,7 @@ struct cpu : private timer_base::client {
     cpu_set incoming_wakeups_mask;
     incoming_wakeup_queue* incoming_wakeups;
     lockfree::queue_mpsc_intrusive<thread, &thread::_stagesched_incoming_link> stagesched_incoming = {};
+    std::atomic<bool> stagesched_incoming_lp_lock; // true <=> busy
     thread* terminating_thread;
     osv::clock::uptime::time_point running_since;
     char* percpu_base;
